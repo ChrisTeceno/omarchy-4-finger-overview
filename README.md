@@ -82,13 +82,13 @@ One window is selected at a time. It starts on the focused window and follows th
 | Esc | Cancel a drag, then clear the search, then close |
 | Type | Search windows (Backspace edits) |
 | Hover a window | Select it |
-| Click a window, or Enter | Focus the selected window |
+| Click a window, or Enter | Focus the selected window (Enter on a box goes to that workspace) |
 | Click the empty part of a workspace | Switch to that workspace |
 | Click an unused box or "+" | Switch to that workspace, or a new one |
 | Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or to an unused box or "+" |
 | Middle-click a window | Close it |
-| Arrow keys | Select the nearest window in that direction, across workspaces |
-| SUPER + arrow keys | Jump to the neighbouring workspace (needs the forwarder above) |
+| Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
+| SUPER + arrow keys | Jump to the neighbouring workspace, unused box or "+" (needs the forwarder above) |
 | SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 

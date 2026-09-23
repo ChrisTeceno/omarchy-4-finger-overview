@@ -36,6 +36,7 @@ Item {
   property int newId: 11         // first workspace id past everything in use
   property int selectedWs: 0     // index into workspaces
   property int selectedWin: -1   // index into workspaces[selectedWs].windows, -1 for none
+  property int selectedBox: -1   // index into the side column (freeIds, then "+"), -1 when a workspace is selected
   property string filterText: ""
   property bool helpOpen: false
 
@@ -70,6 +71,7 @@ Item {
   readonly property int splitGap: 10
 
   readonly property var selectedWindow: {
+    if (root.selectedBox >= 0) return null
     var ws = root.workspaces[root.selectedWs]
     return ws && root.selectedWin >= 0 ? ws.windows[root.selectedWin] : null
   }
@@ -188,6 +190,7 @@ Item {
 
     // Start on the focused window (focusHistoryID 0), else the first window
     // of the active workspace.
+    root.selectedBox = -1
     root.selectedWs = Math.max(0, list.findIndex(function(w) { return w.id === mon.activeWorkspace.id }))
     root.selectedWin = list.length > 0 ? 0 : -1
     for (var w = 0; w < list.length; w++) {
@@ -223,13 +226,89 @@ Item {
   }
 
   function activateSelection() {
-    if (root.selectedWindow) root.focusWindow(root.selectedWindow.address)
+    if (root.selectedBox >= 0) root.goToWorkspace(root.boxId(root.selectedBox))
+    else if (root.selectedWindow) root.focusWindow(root.selectedWindow.address)
     else if (root.workspaces[root.selectedWs]) root.goToWorkspace(root.workspaces[root.selectedWs].id)
   }
 
   function select(wsIndex, winIndex) {
+    root.selectedBox = -1
     root.selectedWs = wsIndex
     root.selectedWin = winIndex
+  }
+
+  function selectBox(i) {
+    root.selectedBox = i
+  }
+
+  // Workspace id of side-column box i: an unused workspace, or "+" last.
+  function boxId(i) {
+    return i < root.freeIds.length ? root.freeIds[i] : root.newId
+  }
+
+  function boxItem(i) {
+    return i < root.freeIds.length ? freeBoxes.itemAt(i) : plusBox
+  }
+
+  // Centers of the side-column boxes, in grid coordinates like the windows.
+  function boxCenters() {
+    var out = []
+    for (var i = 0; i <= root.freeIds.length; i++) {
+      var item = root.boxItem(i)
+      if (!item) continue
+      var p = item.mapToItem(grid, item.width / 2, item.height / 2)
+      out.push({ box: i, x: p.x, y: p.y })
+    }
+    return out
+  }
+
+  // The current selection as a point in grid coordinates: a box, a window,
+  // or (with nothing selected in it) a workspace tile's center.
+  function selectionPoint(windows) {
+    if (root.selectedBox >= 0)
+      return root.boxCenters().find(function(p) { return p.box === root.selectedBox })
+    var w = windows.find(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
+    return w || root.tileCenters().find(function(p) { return p.ws === root.selectedWs })
+  }
+
+  function tileCenters() {
+    var out = []
+    for (var w = 0; w < root.workspaces.length; w++)
+      out.push({ ws: w, win: -1,
+        x: (w % panel.cols) * (panel.tileW + root.gap) + panel.tileW / 2,
+        y: Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap) + panel.tileH / 2 })
+    return out
+  }
+
+  // Nearest candidate from `from` in a direction (dx, dy one of -1/0/1),
+  // preferring candidates in line with it.
+  function nearestInDirection(from, candidates, dx, dy) {
+    var best = null, bestScore = Infinity
+    for (var i = 0; i < candidates.length; i++) {
+      var p = candidates[i]
+      var along = (p.x - from.x) * dx + (p.y - from.y) * dy
+      if (along <= 1) continue
+      var score = along + (Math.abs((p.x - from.x) * dy) + Math.abs((p.y - from.y) * dx)) * 2
+      if (score < bestScore) { bestScore = score; best = p }
+    }
+    return best
+  }
+
+  // Select a workspace tile, landing on its last-focused window that passes
+  // the search.
+  function selectWorkspace(w) {
+    var wins = root.workspaces[w].windows
+    var pick = -1
+    for (var i = 0; i < wins.length; i++)
+      if (root.matches(wins[i]) && (pick < 0 || wins[i].focusHistoryID < wins[pick].focusHistoryID)) pick = i
+    root.select(w, pick)
+  }
+
+  function applyPick(p) {
+    if (!p) return
+    if (p.box !== undefined) root.selectBox(p.box)
+    else if (p.win >= 0) root.select(p.ws, p.win)
+    else root.selectWorkspace(p.ws)
   }
 
   // Search: case-insensitive substring of the window title, class, or the
@@ -284,57 +363,37 @@ Item {
     return out
   }
 
-  // Move the selection to the nearest window in a direction (dx, dy one of
-  // -1/0/1), preferring windows in line with the current one.
+  // Arrow keys: the nearest window in a direction, or a side-column box, so
+  // Right from the rightmost window reaches the unused workspaces and "+".
   function moveSpatial(dx, dy) {
-    var all = root.windowCenters()
-    var from = all.find(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
-    if (!from) { if (all.length > 0) root.select(all[0].ws, all[0].win); return }
-
-    var best = null, bestScore = Infinity
-    for (var i = 0; i < all.length; i++) {
-      var p = all[i]
-      var along = (p.x - from.x) * dx + (p.y - from.y) * dy
-      if (along <= 1) continue
-      var across = Math.abs((p.x - from.x) * dy) + Math.abs((p.y - from.y) * dx)
-      var score = along + across * 2
-      if (score < bestScore) { bestScore = score; best = p }
-    }
-    if (best) root.select(best.ws, best.win)
+    var wins = root.windowCenters()
+    var from = root.selectionPoint(wins)
+    var all = wins.concat(root.boxCenters())
+    if (!from) { root.applyPick(all[0]); return }
+    root.applyPick(root.nearestInDirection(from, all, dx, dy))
   }
 
-  // Move the selection to the nearest workspace tile in a direction, landing
-  // on its last-focused window that passes the search.
+  // SUPER+arrows: the nearest workspace tile in a direction, or a
+  // side-column box.
   function moveWorkspace(dx, dy) {
-    var n = root.workspaces.length
-    if (n === 0) return
-    function center(w) {
-      return { x: (w % panel.cols) * (panel.tileW + root.gap), y: Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap) }
-    }
-    var from = center(root.selectedWs)
-    var best = -1, bestScore = Infinity
-    for (var w = 0; w < n; w++) {
-      var c = center(w)
-      var along = (c.x - from.x) * dx + (c.y - from.y) * dy
-      if (along <= 1) continue
-      var score = along + (Math.abs((c.x - from.x) * dy) + Math.abs((c.y - from.y) * dx)) * 2
-      if (score < bestScore) { bestScore = score; best = w }
-    }
-    if (best < 0) return
-    var wins = root.workspaces[best].windows
-    var pick = -1
-    for (var i = 0; i < wins.length; i++)
-      if (root.matches(wins[i]) && (pick < 0 || wins[i].focusHistoryID < wins[pick].focusHistoryID)) pick = i
-    root.select(best, pick)
+    var tilesAt = root.tileCenters()
+    var from = root.selectedBox >= 0
+      ? root.boxCenters().find(function(p) { return p.box === root.selectedBox })
+      : tilesAt.find(function(p) { return p.ws === root.selectedWs })
+    var all = tilesAt.concat(root.boxCenters())
+    if (!from) { root.applyPick(all[0]); return }
+    root.applyPick(root.nearestInDirection(from, all, dx, dy))
   }
 
-  // Tab order: every window in reading order, wrapping.
+  // Tab order: every window in reading order, then the side-column boxes,
+  // wrapping.
   function moveSequential(delta) {
-    var all = root.windowCenters()
+    var all = root.windowCenters().concat(root.boxCenters())
     if (all.length === 0) return
-    var at = all.findIndex(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
-    var next = all[(Math.max(0, at) + delta + all.length) % all.length]
-    root.select(next.ws, next.win)
+    var at = all.findIndex(function(p) {
+      return root.selectedBox >= 0 ? p.box === root.selectedBox : (p.ws === root.selectedWs && p.win === root.selectedWin)
+    })
+    root.applyPick(all[(Math.max(0, at) + delta + all.length) % all.length])
   }
 
   // Drop targets: workspace tiles, unused-workspace boxes and the "+" box.
@@ -617,7 +676,7 @@ Item {
           id: tile
           required property var modelData
           required property int index
-          readonly property bool selected: index === root.selectedWs
+          readonly property bool selected: index === root.selectedWs && root.selectedBox < 0
           readonly property bool current: root.monitor && modelData.id === root.monitor.activeWorkspace.id
           readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData.id
           readonly property var preview: root.dropPreview(modelData)
@@ -838,7 +897,9 @@ Item {
         delegate: Rectangle {
           id: box
           required property var modelData
+          required property int index
           readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData
+          readonly property bool selected: root.selectedBox === index
           anchors.right: parent.right
           width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
           height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
@@ -846,8 +907,8 @@ Item {
           Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
           radius: root.radius
           color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
-          border.width: dropHere || boxMouse.containsMouse ? Style.space(2) : 1
-          border.color: dropHere || boxMouse.containsMouse ? root.accent : root.dimBorder
+          border.width: dropHere || selected ? Style.space(3) : boxMouse.containsMouse ? Style.space(2) : 1
+          border.color: dropHere || selected || boxMouse.containsMouse ? root.accent : root.dimBorder
 
           // Hidden while the box holds a dragged window.
           Text {
@@ -864,6 +925,7 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            onPositionChanged: if (!root.dragWin) root.selectBox(box.index)
             onClicked: root.goToWorkspace(box.modelData)
           }
         }
@@ -872,6 +934,7 @@ Item {
       Rectangle {
         id: plusBox
         readonly property bool dropHere: root.dragWin !== null && root.dropTarget === root.newId
+        readonly property bool selected: root.selectedBox === root.freeIds.length
         anchors.right: parent.right
         width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
         height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
@@ -879,8 +942,8 @@ Item {
         Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         radius: root.radius
         color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : "transparent"
-        border.width: dropHere || plusMouse.containsMouse ? Style.space(2) : 1
-        border.color: dropHere || plusMouse.containsMouse ? root.accent : root.dimBorder
+        border.width: dropHere || selected ? Style.space(3) : plusMouse.containsMouse ? Style.space(2) : 1
+        border.color: dropHere || selected || plusMouse.containsMouse ? root.accent : root.dimBorder
 
         Text {
           anchors.centerIn: parent
@@ -895,6 +958,7 @@ Item {
           anchors.fill: parent
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
+          onPositionChanged: if (!root.dragWin) root.selectBox(root.freeIds.length)
           onClicked: root.goToWorkspace(root.newId)
         }
       }
@@ -949,9 +1013,9 @@ Item {
           Repeater {
             model: [
               "Arrow keys", "Select the nearest window in that direction",
-              "SUPER + arrow keys", "Jump to the neighbouring workspace",
+              "SUPER + arrow keys", "Jump to the neighbouring workspace or box",
               "Tab / Shift + Tab", "Step through every window",
-              "Enter", "Focus the selected window",
+              "Enter", "Focus the selected window, or go to the selected box",
               "Type", "Search by title, app or program (Backspace edits)",
               "Esc", "Cancel drag, clear search, then close",
               "Click window", "Focus it",
