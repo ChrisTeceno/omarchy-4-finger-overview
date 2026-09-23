@@ -2,7 +2,7 @@
 
 A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger swipe up on the trackpad, similar to Mission Control on macOS.
 
-It shows only the workspaces on the **focused monitor** that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Workspaces on other monitors are left out. A column on the right lists the unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new workspace.
+It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. A column on the right of each monitor lists the unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new workspace; using a box on a monitor puts that workspace on that monitor.
 
 Drag a window onto an unused box or "+" to move it there; the box grows around the window as you hover. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
 
@@ -116,7 +116,8 @@ Restart the shell after an update: this plugin stays loaded, and the shell's hot
 
 - Only regular workspaces are shown. Special workspaces (such as the scratchpad) are skipped.
 - Window positions come from `hyprctl` when the overview opens; previews then update live while it stays open.
-- Tested on a single monitor so far. Multi-monitor reports are welcome.
+- With several monitors, the selection, the arrow keys and dragging all cross monitors following their arrangement. Keys go to the focused monitor's overview. After a move, every monitor goes back to the workspace it was showing.
+- Tested with three monitors, including a 1.0-scale ultrawide next to a 2.0-scale laptop screen.
 
 ## License
 

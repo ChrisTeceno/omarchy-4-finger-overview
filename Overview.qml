@@ -5,24 +5,26 @@ import Quickshell.Hyprland
 import QtQuick
 import qs.Commons
 
-// Workspace overview for the focused monitor. Shows every regular workspace on
-// that monitor holding at least one window, each as a scaled-down copy of the
-// monitor with live previews of its windows. A column on the right lists the
-// unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new
-// workspace past the highest one in use.
+// Workspace overview, shown on every monitor at once. Each monitor shows its
+// own regular workspaces that hold at least one window, each as a
+// scaled-down copy of the monitor with live previews of its windows. A
+// column on the right of each monitor lists the unused workspaces 1 to 10 as
+// small numbered boxes, plus a "+" box for a new workspace past the highest
+// one in use; using a box on a monitor puts that workspace on that monitor.
 //
-// One window is selected at a time: it starts on the focused window, follows
-// the mouse, and moves with the arrow keys to the nearest window in that
-// direction, across workspaces. Enter or a click focuses it; clicking the
-// empty part of a workspace switches to that workspace. Typing filters the
-// windows by title and class.
+// One window is selected at a time, across all monitors: it starts on the
+// focused window, follows the mouse, and moves with the arrow keys to the
+// nearest window in that direction, across workspaces and monitors. Enter or
+// a click focuses it; clicking the empty part of a workspace switches to that
+// workspace. Typing filters the windows by title, class, and the programs
+// running in them. Keys go to the focused monitor's overview.
 //
-// Dragging a window onto another workspace, an unused box, or "+" moves it
-// there without leaving the overview, which then re-reads the layout. Inside
-// a workspace, including the window's own, the drop splits the tiled window
-// under the cursor, on the side of it nearest the cursor. While dragging, a
-// box grows around the window, and a workspace previews the split, with the
-// window being split sliding over to make room.
+// Dragging a window onto another workspace (on any monitor), an unused box,
+// or "+" moves it there without leaving the overview, which then re-reads the
+// layout. Inside a workspace, including the window's own, the drop splits the
+// tiled window under the cursor, on the side of it nearest the cursor. While
+// dragging, a box grows around the window, and a workspace previews the
+// split, with the window being split sliding over to make room.
 //
 // Summoned by a 4-finger swipe (see README) through
 // `omarchy-shell shell summon christeceno.4-finger-overview '{}'`.
@@ -30,19 +32,27 @@ Item {
   id: root
 
   property bool opened: false
-  property var monitor: null     // hyprctl monitors entry for the focused monitor
-  property var workspaces: []    // [{ id, name, windows: [client, ...] }]
-  property var freeIds: []       // workspaces 1 to 10 with no windows on any monitor
+  property var monitors: []      // hyprctl monitors
+  property string focusedMon: "" // name of the focused monitor
+  property var wsByMon: ({})     // monitor name -> [{ id, name, windows: [client, ...] }]
+  property var freeIds: []       // workspaces 1 to 10 that do not exist anywhere
   property int newId: 11         // first workspace id past everything in use
-  property int selectedWs: 0     // index into workspaces
-  property int selectedWin: -1   // index into workspaces[selectedWs].windows, -1 for none
-  property int selectedBox: -1   // index into the side column (freeIds, then "+"), -1 when a workspace is selected
+  property var panels: ({})      // monitor name -> that monitor's overview window
+
+  // Selection: a window (selWin >= 0) or workspace (selWin -1) in workspace
+  // selWs of monitor selMon, or a side-column box (selBox >= 0) on selMon.
+  property string selMon: ""
+  property int selWs: 0
+  property int selWin: -1
+  property int selBox: -1
   property string filterText: ""
   property bool helpOpen: false
 
-  // Drag state. dragX/dragY are in panel coordinates; dropTarget is the
-  // workspace id under the cursor, or -1.
+  // Drag state. dragMon is the monitor under the cursor and dragX/dragY are
+  // in that monitor's overview coordinates; dropTarget is the workspace id
+  // under the cursor, or -1.
   property var dragWin: null
+  property string dragMon: ""
   property real dragX: 0
   property real dragY: 0
   property int dropTarget: -1
@@ -72,9 +82,29 @@ Item {
   readonly property int splitGap: 10
 
   readonly property var selectedWindow: {
-    if (root.selectedBox >= 0) return null
-    var ws = root.workspaces[root.selectedWs]
-    return ws && root.selectedWin >= 0 ? ws.windows[root.selectedWin] : null
+    if (root.selBox >= 0) return null
+    var ws = (root.wsByMon[root.selMon] || [])[root.selWs]
+    return ws && root.selWin >= 0 ? ws.windows[root.selWin] : null
+  }
+
+  function monitorByName(name) {
+    return root.monitors.find(function(m) { return m.name === name }) || null
+  }
+
+  // Logical size of a monitor: hyprctl reports physical pixels, windows are
+  // laid out in logical (scaled) coordinates, and a rotated monitor swaps
+  // its sides.
+  function logicalSize(m) {
+    var w = m.width / m.scale, h = m.height / m.scale
+    return m.transform % 2 === 1 ? { w: h, h: w } : { w: w, h: h }
+  }
+
+  function registerPanel(name, panel) {
+    var next = ({})
+    for (var k in root.panels) next[k] = root.panels[k]
+    if (panel) next[name] = panel
+    else delete next[name]
+    root.panels = next
   }
 
   // While open, a payload of {"jump": "l"|"r"|"u"|"d"} moves the selection to
@@ -86,19 +116,19 @@ Item {
   function open(payloadJson) {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
+    var dirs = { l: [-1, 0], r: [1, 0], u: [0, -1], d: [0, 1] }
     if (root.opened && payload.help) {
       root.helpOpen = !root.helpOpen
       return
     }
     if (root.opened && payload.grab) {
-      var gd = { l: [-1, 0], r: [1, 0], u: [0, -1], d: [0, 1] }[payload.grab]
+      var gd = dirs[payload.grab]
       if (gd) root.grabStep(gd[0], gd[1])
       return
     }
     if (root.opened && payload.jump) {
-      var dirs = { l: [-1, 0], r: [1, 0], u: [0, -1], d: [0, 1] }
-      var d = dirs[payload.jump]
-      if (d) root.moveWorkspace(d[0], d[1])
+      var jd = dirs[payload.jump]
+      if (jd) root.moveWorkspace(jd[0], jd[1])
       return
     }
     root.filterText = ""
@@ -142,9 +172,7 @@ Item {
   function build(raw) {
     var data
     try { data = JSON.parse(raw) } catch (e) { console.warn("overview: bad hyprctl output", e); return }
-
-    var mon = data.monitors.find(function(m) { return m.focused }) || data.monitors[0]
-    if (!mon) return
+    if (!data.monitors.length) return
 
     // Program names in each window's process tree, two levels down from the
     // window's own process: terminal, then shell or multiplexer, then what
@@ -169,48 +197,75 @@ Item {
       return names.join(" ")
     }
 
-    var byId = {}
+    var monName = {}
+    data.monitors.forEach(function(m) { monName[m.id] = m.name })
+
+    var byMon = {}
+    data.monitors.forEach(function(m) { byMon[m.name] = {} })
     var used = {}
     var highest = 10
+    data.workspaces.forEach(function(w) {
+      if (w.id <= 0) return
+      used[w.id] = true
+      highest = Math.max(highest, w.id)
+    })
     for (var i = 0; i < data.clients.length; i++) {
       var c = data.clients[i]
       if (c.workspace.id <= 0) continue
       used[c.workspace.id] = true
       highest = Math.max(highest, c.workspace.id)
-      if (c.monitor !== mon.id || !c.mapped || c.hidden) continue
+      var mon = monName[c.monitor]
+      if (!mon || !c.mapped || c.hidden) continue
       c.programs = programs(c.pid)
-      if (!byId[c.workspace.id]) byId[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, windows: [] }
-      byId[c.workspace.id].windows.push(c)
+      var group = byMon[mon]
+      if (!group[c.workspace.id]) group[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, windows: [] }
+      group[c.workspace.id].windows.push(c)
     }
-    for (var j = 0; j < data.workspaces.length; j++)
-      if (data.workspaces[j].id > 0) highest = Math.max(highest, data.workspaces[j].id)
 
-    var list = Object.keys(byId).map(function(k) { return byId[k] })
-    list.sort(function(a, b) { return a.id - b.id })
+    var lists = {}
+    for (var name in byMon) {
+      var g = byMon[name]
+      lists[name] = Object.keys(g).map(function(k) { return g[k] }).sort(function(a, b) { return a.id - b.id })
+    }
 
     var free = []
     for (var n = 1; n <= 10; n++) if (!used[n]) free.push(n)
 
-    root.monitor = mon
-    root.workspaces = list
+    var focused = data.monitors.find(function(m) { return m.focused }) || data.monitors[0]
+
+    root.monitors = data.monitors
+    root.focusedMon = focused.name
+    root.wsByMon = lists
     root.freeIds = free
     root.newId = highest + 1
 
-    // Start on the focused window (focusHistoryID 0), else the first window
-    // of the active workspace.
-    root.selectedBox = -1
-    root.selectedWs = Math.max(0, list.findIndex(function(w) { return w.id === mon.activeWorkspace.id }))
-    root.selectedWin = list.length > 0 ? 0 : -1
-    for (var w = 0; w < list.length; w++) {
-      var idx = list[w].windows.findIndex(function(c) { return c.focusHistoryID === 0 })
-      if (idx >= 0) { root.selectedWs = w; root.selectedWin = idx }
+    // Start on the focused window (focusHistoryID 0), else the active
+    // workspace of the focused monitor.
+    root.selBox = -1
+    root.selMon = focused.name
+    root.selWs = Math.max(0, (lists[focused.name] || []).findIndex(function(w) { return w.id === focused.activeWorkspace.id }))
+    root.selWin = -1
+    for (var mn in lists) {
+      for (var w = 0; w < lists[mn].length; w++) {
+        var idx = lists[mn][w].windows.findIndex(function(c) { return c.focusHistoryID === 0 })
+        if (idx >= 0) { root.selMon = mn; root.selWs = w; root.selWin = idx }
+      }
     }
     root.selectFirstMatchIfHidden()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   function dispatch(lua) {
     Hyprland.dispatch(lua)
+  }
+
+  function runBatch(steps) {
+    batchProc.command = ["hyprctl", "--batch", steps.map(function(x) { return "dispatch " + x }).join(" ; ")]
+    batchProc.running = true
+  }
+
+  Process {
+    id: batchProc
+    onExited: refreshTimer.restart()
   }
 
   function goToWorkspace(id) {
@@ -218,14 +273,19 @@ Item {
     root.dispatch("hl.dsp.focus({ workspace = \"" + id + "\" })")
   }
 
+  // An unused or new workspace, created on monitor `mon`: Hyprland creates a
+  // workspace on the focused monitor, so focus that monitor first.
+  function goToNewWorkspace(id, mon) {
+    root.close()
+    root.runBatch([
+      "hl.dsp.focus({ monitor = \"" + mon + "\" })",
+      "hl.dsp.focus({ workspace = \"" + id + "\" })"
+    ])
+  }
+
   function focusWindow(address) {
     root.close()
     root.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
-  }
-
-  function moveWindow(address, workspaceId) {
-    root.dispatch("hl.dsp.window.move({ window = \"address:" + address + "\", workspace = \"" + workspaceId + "\", follow = false })")
-    refreshTimer.restart()
   }
 
   function closeWindow(address) {
@@ -233,90 +293,94 @@ Item {
     refreshTimer.restart()
   }
 
+  // Steps that put every monitor back on the workspace it was showing, the
+  // focused monitor last so focus ends where it started.
+  function restoreSteps() {
+    var steps = []
+    var focused = root.monitorByName(root.focusedMon)
+    root.monitors.forEach(function(m) {
+      if (m.name !== root.focusedMon) steps.push("hl.dsp.focus({ workspace = \"" + m.activeWorkspace.id + "\" })")
+    })
+    if (focused) steps.push("hl.dsp.focus({ workspace = \"" + focused.activeWorkspace.id + "\" })")
+    return steps
+  }
+
+  // Move window w to workspace wsId on monitor mon, filling it. For a
+  // workspace that does not exist yet, focus the monitor first so Hyprland
+  // creates it there.
+  function moveWindow(w, wsId, mon) {
+    var steps = []
+    if (!root.workspaceExists(wsId)) steps.push("hl.dsp.focus({ monitor = \"" + mon + "\" })")
+    steps.push("hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + wsId + "\", follow = false })")
+    root.runBatch(steps.concat(root.restoreSteps()))
+  }
+
+  function workspaceExists(id) {
+    for (var name in root.wsByMon)
+      if (root.wsByMon[name].some(function(w) { return w.id === id })) return true
+    return root.monitors.some(function(m) { return m.activeWorkspace.id === id })
+  }
+
+  // Put window w into workspace wsId as a split of window `target`, on `side`.
+  // Hyprland's dwindle layout (with use_active_for_splits, the default)
+  // splits the focused window of the workspace a window is added to, and
+  // "preselect" picks the side for the next one. So: focus the target, which
+  // shows its workspace behind the overview, preselect, add the window, then
+  // put every monitor back on the workspace it was showing. A window already
+  // in wsId is first parked on a special workspace so it can be added again.
+  // A floating window is tiled as it lands, which is what adds it to the
+  // split. Run as one hyprctl batch so nothing else lands in between.
+  function placeWindow(w, wsId, target, side) {
+    var addr = "address:" + w.address
+    var steps = []
+    if (w.workspace.id === wsId)
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"special:overview-drag\", follow = false })")
+    steps.push("hl.dsp.focus({ window = \"address:" + target.address + "\" })")
+    if (w.floating) {
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
+      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
+      steps.push("hl.dsp.window.float({ window = \"" + addr + "\", action = \"disable\" })")
+    } else {
+      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
+    }
+    root.runBatch(steps.concat(root.restoreSteps()))
+  }
+
   function activateSelection() {
-    if (root.selectedBox >= 0) root.goToWorkspace(root.boxId(root.selectedBox))
+    if (root.selBox >= 0) root.goToNewWorkspace(root.boxId(root.selBox), root.selMon)
     else if (root.selectedWindow) root.focusWindow(root.selectedWindow.address)
-    else if (root.workspaces[root.selectedWs]) root.goToWorkspace(root.workspaces[root.selectedWs].id)
+    else {
+      var ws = (root.wsByMon[root.selMon] || [])[root.selWs]
+      if (ws) root.goToWorkspace(ws.id)
+    }
   }
 
-  function select(wsIndex, winIndex) {
-    root.selectedBox = -1
-    root.selectedWs = wsIndex
-    root.selectedWin = winIndex
+  function select(mon, wsIndex, winIndex) {
+    root.selBox = -1
+    root.selMon = mon
+    root.selWs = wsIndex
+    root.selWin = winIndex
   }
 
-  function selectBox(i) {
-    root.selectedBox = i
+  function selectBox(mon, i) {
+    root.selMon = mon
+    root.selBox = i
+  }
+
+  // Select a workspace tile, landing on its last-focused window that passes
+  // the search.
+  function selectWorkspace(mon, w) {
+    var wins = root.wsByMon[mon][w].windows
+    var pick = -1
+    for (var i = 0; i < wins.length; i++)
+      if (root.matches(wins[i]) && (pick < 0 || wins[i].focusHistoryID < wins[pick].focusHistoryID)) pick = i
+    root.select(mon, w, pick)
   }
 
   // Workspace id of side-column box i: an unused workspace, or "+" last.
   function boxId(i) {
     return i < root.freeIds.length ? root.freeIds[i] : root.newId
-  }
-
-  function boxItem(i) {
-    return i < root.freeIds.length ? freeBoxes.itemAt(i) : plusBox
-  }
-
-  // Centers of the side-column boxes, in grid coordinates like the windows.
-  function boxCenters() {
-    var out = []
-    for (var i = 0; i <= root.freeIds.length; i++) {
-      var item = root.boxItem(i)
-      if (!item) continue
-      var p = item.mapToItem(grid, item.width / 2, item.height / 2)
-      out.push({ box: i, x: p.x, y: p.y })
-    }
-    return out
-  }
-
-  // The current selection as a point in grid coordinates: a box, a window,
-  // or (with nothing selected in it) a workspace tile's center.
-  function selectionPoint(windows) {
-    if (root.selectedBox >= 0)
-      return root.boxCenters().find(function(p) { return p.box === root.selectedBox })
-    var w = windows.find(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
-    return w || root.tileCenters().find(function(p) { return p.ws === root.selectedWs })
-  }
-
-  function tileCenters() {
-    var out = []
-    for (var w = 0; w < root.workspaces.length; w++)
-      out.push({ ws: w, win: -1,
-        x: (w % panel.cols) * (panel.tileW + root.gap) + panel.tileW / 2,
-        y: Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap) + panel.tileH / 2 })
-    return out
-  }
-
-  // Nearest candidate from `from` in a direction (dx, dy one of -1/0/1),
-  // preferring candidates in line with it.
-  function nearestInDirection(from, candidates, dx, dy) {
-    var best = null, bestScore = Infinity
-    for (var i = 0; i < candidates.length; i++) {
-      var p = candidates[i]
-      var along = (p.x - from.x) * dx + (p.y - from.y) * dy
-      if (along <= 1) continue
-      var score = along + (Math.abs((p.x - from.x) * dy) + Math.abs((p.y - from.y) * dx)) * 2
-      if (score < bestScore) { bestScore = score; best = p }
-    }
-    return best
-  }
-
-  // Select a workspace tile, landing on its last-focused window that passes
-  // the search.
-  function selectWorkspace(w) {
-    var wins = root.workspaces[w].windows
-    var pick = -1
-    for (var i = 0; i < wins.length; i++)
-      if (root.matches(wins[i]) && (pick < 0 || wins[i].focusHistoryID < wins[pick].focusHistoryID)) pick = i
-    root.select(w, pick)
-  }
-
-  function applyPick(p) {
-    if (!p) return
-    if (p.box !== undefined) root.selectBox(p.box)
-    else if (p.win >= 0) root.select(p.ws, p.win)
-    else root.selectWorkspace(p.ws)
   }
 
   // Search: case-insensitive substring of the window title, class, or the
@@ -336,9 +400,9 @@ Item {
 
   function selectFirstMatchIfHidden() {
     if (root.selectedWindow && root.matches(root.selectedWindow)) return
-    var all = root.windowCenters()
-    if (all.length > 0) root.select(all[0].ws, all[0].win)
-    else root.selectedWin = -1
+    var all = root.windowPoints()
+    if (all.length > 0) root.applyPick(all[0])
+    else root.selWin = -1
   }
 
   // Wayland toplevel handle for a Hyprland window address, for screencopy.
@@ -351,73 +415,153 @@ Item {
     return null
   }
 
-  // Every window that passes the search, with its center in overview
-  // coordinates, in reading order.
-  function windowCenters() {
+  // Navigation works in global layout coordinates, so the arrow keys cross
+  // monitors the way the monitors are arranged. Each candidate carries
+  // { mon, ws, win } or { mon, box } plus its point { x, y }.
+  function toGlobal(mon, p) {
+    var m = root.monitorByName(mon)
+    return m && p ? { x: m.x + p.x, y: m.y + p.y } : null
+  }
+
+  // Panel point at fractions (fx, fy) across window c's rect in workspace
+  // tile w of monitor mon's overview.
+  function windowPoint(mon, w, c, fx, fy) {
+    var panel = root.panels[mon]
+    var item = panel ? panel.tileAt(w) : null
+    var m = root.monitorByName(mon)
+    if (!item || !m) return null
+    return item.mapToItem(panel.contentItem,
+      (c.at[0] - m.x + c.size[0] * fx) * panel.tileScale,
+      (c.at[1] - m.y + c.size[1] * fy) * panel.tileScale)
+  }
+
+  function forEachMonitor(fn) {
+    root.monitors.slice().sort(function(a, b) { return a.x - b.x || a.y - b.y }).forEach(function(m) { fn(m.name) })
+  }
+
+  // Every window that passes the search, in monitor then reading order.
+  function windowPoints() {
     var out = []
-    for (var w = 0; w < root.workspaces.length; w++) {
-      var tileX = (w % panel.cols) * (panel.tileW + root.gap)
-      var tileY = Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap)
-      var wins = root.workspaces[w].windows
-      for (var i = 0; i < wins.length; i++) {
-        if (!root.matches(wins[i])) continue
-        out.push({
-          ws: w, win: i,
-          x: tileX + (wins[i].at[0] - root.monitor.x + wins[i].size[0] / 2) * panel.tileScale,
-          y: tileY + (wins[i].at[1] - root.monitor.y + wins[i].size[1] / 2) * panel.tileScale
-        })
-      }
-    }
+    root.forEachMonitor(function(mon) {
+      var list = root.wsByMon[mon] || []
+      for (var w = 0; w < list.length; w++)
+        for (var i = 0; i < list[w].windows.length; i++) {
+          if (!root.matches(list[w].windows[i])) continue
+          var p = root.toGlobal(mon, root.windowPoint(mon, w, list[w].windows[i], 0.5, 0.5))
+          if (p) out.push({ mon: mon, ws: w, win: i, x: p.x, y: p.y })
+        }
+    })
     return out
   }
 
-  // Arrow keys: the nearest window in a direction, or a side-column box, so
-  // Right from the rightmost window reaches the unused workspaces and "+".
+  function tilePoints() {
+    var out = []
+    root.forEachMonitor(function(mon) {
+      var panel = root.panels[mon]
+      var list = root.wsByMon[mon] || []
+      for (var w = 0; w < list.length; w++) {
+        var item = panel ? panel.tileAt(w) : null
+        if (!item) continue
+        var p = root.toGlobal(mon, item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
+        out.push({ mon: mon, ws: w, win: -1, x: p.x, y: p.y })
+      }
+    })
+    return out
+  }
+
+  function boxPoints() {
+    var out = []
+    root.forEachMonitor(function(mon) {
+      var panel = root.panels[mon]
+      if (!panel) return
+      for (var i = 0; i <= root.freeIds.length; i++) {
+        var item = panel.boxAt(i)
+        if (!item) continue
+        var p = root.toGlobal(mon, item.mapToItem(panel.contentItem, item.width / 2, item.height / 2))
+        out.push({ mon: mon, box: i, x: p.x, y: p.y })
+      }
+    })
+    return out
+  }
+
+  function isSelected(p) {
+    if (p.mon !== root.selMon) return false
+    if (p.box !== undefined) return root.selBox === p.box
+    return root.selBox < 0 && p.ws === root.selWs && (p.win === root.selWin || p.win === -1)
+  }
+
+  // The current selection's point, from the given candidates, else its tile.
+  function selectionPoint(candidates) {
+    return candidates.find(root.isSelected) || root.tilePoints().find(root.isSelected) || null
+  }
+
+  // Nearest candidate from `from` in a direction (dx, dy one of -1/0/1),
+  // preferring candidates in line with it.
+  function nearestInDirection(from, candidates, dx, dy) {
+    var best = null, bestScore = Infinity
+    for (var i = 0; i < candidates.length; i++) {
+      var p = candidates[i]
+      var along = (p.x - from.x) * dx + (p.y - from.y) * dy
+      if (along <= 1) continue
+      var score = along + (Math.abs((p.x - from.x) * dy) + Math.abs((p.y - from.y) * dx)) * 2
+      if (score < bestScore) { bestScore = score; best = p }
+    }
+    return best
+  }
+
+  function applyPick(p) {
+    if (!p) return
+    if (p.box !== undefined) root.selectBox(p.mon, p.box)
+    else if (p.win >= 0) root.select(p.mon, p.ws, p.win)
+    else root.selectWorkspace(p.mon, p.ws)
+  }
+
+  // Arrow keys: the nearest window in a direction, or a side-column box, on
+  // any monitor.
   function moveSpatial(dx, dy) {
-    var wins = root.windowCenters()
-    var from = root.selectionPoint(wins)
-    var all = wins.concat(root.boxCenters())
+    var all = root.windowPoints().concat(root.boxPoints())
+    var from = root.selectionPoint(all)
     if (!from) { root.applyPick(all[0]); return }
     root.applyPick(root.nearestInDirection(from, all, dx, dy))
   }
 
   // SUPER+arrows: the nearest workspace tile in a direction, or a
-  // side-column box.
+  // side-column box, on any monitor.
   function moveWorkspace(dx, dy) {
-    var tilesAt = root.tileCenters()
-    var from = root.selectedBox >= 0
-      ? root.boxCenters().find(function(p) { return p.box === root.selectedBox })
-      : tilesAt.find(function(p) { return p.ws === root.selectedWs })
-    var all = tilesAt.concat(root.boxCenters())
+    var all = root.tilePoints().concat(root.boxPoints())
+    var from = all.find(function(p) {
+      return p.mon === root.selMon && (root.selBox >= 0 ? p.box === root.selBox : (p.box === undefined && p.ws === root.selWs))
+    })
     if (!from) { root.applyPick(all[0]); return }
     root.applyPick(root.nearestInDirection(from, all, dx, dy))
   }
 
-  // Tab order: every window in reading order, then the side-column boxes,
+  // Tab order: every window, then the side-column boxes of each monitor,
   // wrapping.
   function moveSequential(delta) {
-    var all = root.windowCenters().concat(root.boxCenters())
+    var all = root.windowPoints().concat(root.boxPoints())
     if (all.length === 0) return
-    var at = all.findIndex(function(p) {
-      return root.selectedBox >= 0 ? p.box === root.selectedBox : (p.ws === root.selectedWs && p.win === root.selectedWin)
-    })
+    var at = all.findIndex(root.isSelected)
     root.applyPick(all[(Math.max(0, at) + delta + all.length) % all.length])
   }
 
-  // Drop targets: workspace tiles, unused-workspace boxes and the "+" box.
-  // Returns { id, box } for the target under a panel-coordinate point, where
-  // box is the box item or null for a tile; id is -1 over nothing.
-  function targetAt(px, py) {
+  // Drop targets on monitor mon's overview: workspace tiles, unused-workspace
+  // boxes and the "+" box. Returns { id, box } for the target under a panel
+  // point, where box is the box item or null for a tile; id is -1 over
+  // nothing.
+  function targetAt(mon, px, py) {
+    var panel = root.panels[mon]
+    if (!panel) return { id: -1, box: null }
     function hit(item) {
       if (!item) return false
       var p = item.mapFromItem(panel.contentItem, px, py)
       return p.x >= 0 && p.y >= 0 && p.x < item.width && p.y < item.height
     }
-    for (var i = 0; i < tiles.count; i++)
-      if (hit(tiles.itemAt(i))) return { id: root.workspaces[i].id, box: null }
-    for (var j = 0; j < freeBoxes.count; j++)
-      if (hit(freeBoxes.itemAt(j))) return { id: root.freeIds[j], box: freeBoxes.itemAt(j) }
-    if (hit(plusBox)) return { id: root.newId, box: plusBox }
+    var list = root.wsByMon[mon] || []
+    for (var i = 0; i < list.length; i++)
+      if (hit(panel.tileAt(i))) return { id: list[i].id, box: null }
+    for (var j = 0; j <= root.freeIds.length; j++)
+      if (hit(panel.boxAt(j))) return { id: root.boxId(j), box: panel.boxAt(j) }
     return { id: -1, box: null }
   }
 
@@ -426,28 +570,47 @@ Item {
     root.dropTarget = -1
   }
 
-  function updateDrag(px, py) {
-    root.dragX = px
-    root.dragY = py
-    var t = root.targetAt(px, py)
-    root.dropTarget = t.id
-    root.dropBox = t.box
-    root.dropAt = t.id > 0 && !t.box ? root.splitAt(t.id, px, py) : null
+  // Pointer moved during a drag, at a point in monitor `fromMon`'s overview.
+  // The press keeps the pointer grab on that overview even when the pointer
+  // crosses to another monitor, so the point can lie outside it: convert to
+  // global coordinates and find the monitor it is really on.
+  function updateDragFrom(fromMon, px, py) {
+    var g = root.toGlobal(fromMon, { x: px, y: py })
+    if (!g) return
+    var on = root.monitors.find(function(m) {
+      var s = root.logicalSize(m)
+      return g.x >= m.x && g.y >= m.y && g.x < m.x + s.w && g.y < m.y + s.h
+    })
+    if (!on) return
+    root.updateDrag(on.name, g.x - on.x, g.y - on.y)
   }
 
-  // Which tiled window of workspace wsId a drop at a panel point splits, and
-  // on which side: the window under the point, else the nearest one by
-  // center, never the dragged window itself. The side is the edge of that
-  // window nearest the point, measured relative to its size.
-  function splitAt(wsId, px, py) {
-    var i = root.workspaces.findIndex(function(w) { return w.id === wsId })
-    var item = tiles.itemAt(i)
-    if (i < 0 || !item) return null
+  function updateDrag(mon, px, py) {
+    root.dragMon = mon
+    root.dragX = px
+    root.dragY = py
+    var t = root.targetAt(mon, px, py)
+    root.dropTarget = t.id
+    root.dropBox = t.box
+    root.dropAt = t.id > 0 && !t.box ? root.splitAt(mon, t.id, px, py) : null
+  }
+
+  // Which tiled window of workspace wsId on monitor mon a drop at a panel
+  // point splits, and on which side: the window under the point, else the
+  // nearest one by center, never the dragged window itself. The side is the
+  // edge of that window nearest the point, measured relative to its size.
+  function splitAt(mon, wsId, px, py) {
+    var panel = root.panels[mon]
+    var list = root.wsByMon[mon] || []
+    var i = list.findIndex(function(w) { return w.id === wsId })
+    var item = panel ? panel.tileAt(i) : null
+    var m = root.monitorByName(mon)
+    if (i < 0 || !item || !m) return null
     var local = item.mapFromItem(panel.contentItem, px, py)
-    var lx = local.x / panel.tileScale + root.monitor.x
-    var ly = local.y / panel.tileScale + root.monitor.y
+    var lx = local.x / panel.tileScale + m.x
+    var ly = local.y / panel.tileScale + m.y
     var dragged = root.dragWin
-    var tiled = root.workspaces[i].windows.filter(function(c) { return !c.floating && c.address !== dragged.address })
+    var tiled = list[i].windows.filter(function(c) { return !c.floating && c.address !== dragged.address })
     if (tiled.length === 0) return { target: null, side: "" }
 
     var target = null, best = Infinity
@@ -468,131 +631,104 @@ Item {
     var target = root.dropTarget
     var at = root.dropAt
     var box = root.dropBox
+    var mon = root.dragMon
     root.endDrag()
     if (!w || target <= 0) return
     if (!box && at && at.target) root.placeWindow(w, target, at.target, at.side)
-    else if (target !== w.workspace.id) root.moveWindow(w.address, target)
-  }
-
-  // Put window w into workspace wsId as a split of window `target`, on `side`.
-  // Hyprland's dwindle layout (with use_active_for_splits, the default)
-  // splits the focused window of the workspace a window is added to, and
-  // "preselect" picks the side for the next one. So: focus the target, which
-  // shows its workspace behind the overview, preselect, add the window, then
-  // return to the workspace that was showing. A window already in wsId is
-  // first parked on a special workspace so it can be added again. A floating
-  // window is tiled as it lands, which is what adds it to the split. Run as
-  // one hyprctl batch so nothing else lands in between.
-  function placeWindow(w, wsId, target, side) {
-    var addr = "address:" + w.address
-    var steps = []
-    if (w.workspace.id === wsId)
-      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"special:overview-drag\", follow = false })")
-    steps.push("hl.dsp.focus({ window = \"address:" + target.address + "\" })")
-    if (w.floating) {
-      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
-      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
-      steps.push("hl.dsp.window.float({ window = \"" + addr + "\", action = \"disable\" })")
-    } else {
-      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
-      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
-    }
-    steps.push("hl.dsp.focus({ workspace = \"" + root.monitor.activeWorkspace.id + "\" })")
-    batchProc.command = ["hyprctl", "--batch", steps.map(function(x) { return "dispatch " + x }).join(" ; ")]
-    batchProc.running = true
-  }
-
-  Process {
-    id: batchProc
-    onExited: refreshTimer.restart()
+    else if (target !== w.workspace.id) root.moveWindow(w, target, mon)
   }
 
   // Keyboard drag. The first SUPER+SHIFT+arrow picks up the selected window;
   // each arrow after that moves it to the nearest drop slot in that
-  // direction: a side of another window, an empty workspace, an unused box or
-  // "+". It reuses the mouse drag by pointing the drag at the slot, so the
-  // preview and the drop are the same. Enter drops, Esc cancels.
+  // direction, on any monitor: a side of another window, an empty workspace,
+  // an unused box or "+". It reuses the mouse drag by pointing the drag at
+  // the slot, so the preview and the drop are the same. Enter drops, Esc
+  // cancels.
   function grabStep(dx, dy) {
     if (!root.dragWin) {
       // With a workspace selected but no window (the pointer resting on a
       // gap), take its last-focused window.
-      if (!root.selectedWindow && root.selectedBox < 0 && root.workspaces[root.selectedWs])
-        root.selectWorkspace(root.selectedWs)
+      if (!root.selectedWindow && root.selBox < 0 && (root.wsByMon[root.selMon] || [])[root.selWs])
+        root.selectWorkspace(root.selMon, root.selWs)
       var w = root.selectedWindow
       if (!w) return
-      var start = root.windowPoint(root.selectedWs, w, 0.5, 0.5)
+      var start = root.windowPoint(root.selMon, root.selWs, w, 0.5, 0.5)
       root.startDrag(w)
       root.keyGrab = true
-      if (start) root.updateDrag(start.x, start.y)
+      if (start) root.updateDrag(root.selMon, start.x, start.y)
     }
-    var best = root.nearestInDirection({ x: root.dragX, y: root.dragY }, root.grabSlots(), dx, dy)
-    if (best) root.updateDrag(best.x, best.y)
+    var from = root.toGlobal(root.dragMon, { x: root.dragX, y: root.dragY })
+    var best = root.nearestInDirection(from, root.grabSlots(), dx, dy)
+    if (best) root.updateDrag(best.mon, best.px, best.py)
   }
 
-  // Panel-coordinate point at fractions (fx, fy) across window c's rect in
-  // workspace tile w.
-  function windowPoint(w, c, fx, fy) {
-    var item = tiles.itemAt(w)
-    if (!item) return null
-    return item.mapToItem(panel.contentItem,
-      (c.at[0] - root.monitor.x + c.size[0] * fx) * panel.tileScale,
-      (c.at[1] - root.monitor.y + c.size[1] * fy) * panel.tileScale)
-  }
-
-  // Every drop slot as a panel point that splitAt/targetAt resolve to it:
-  // just inside each edge of every other tiled window, the center of a
-  // workspace with nothing to split, and each side-column box.
+  // Every drop slot, as a point that targetAt/splitAt resolve to it: just
+  // inside each edge of every other tiled window, the center of a workspace
+  // with nothing to split, and each side-column box. Carries both the panel
+  // point (px, py) and the global point (x, y).
   function grabSlots() {
     var out = []
-    for (var w = 0; w < root.workspaces.length; w++) {
-      var tiled = root.workspaces[w].windows.filter(function(c) { return !c.floating && c.address !== root.dragWin.address })
-      if (tiled.length === 0) {
-        var item = tiles.itemAt(w)
-        if (item) out.push(item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
-        continue
-      }
-      tiled.forEach(function(c) {
-        ;[[0.15, 0.5], [0.85, 0.5], [0.5, 0.15], [0.5, 0.85]].forEach(function(f) {
-          var p = root.windowPoint(w, c, f[0], f[1])
-          if (p) out.push(p)
+    function add(mon, p) {
+      var g = root.toGlobal(mon, p)
+      if (g) out.push({ mon: mon, px: p.x, py: p.y, x: g.x, y: g.y })
+    }
+    root.forEachMonitor(function(mon) {
+      var panel = root.panels[mon]
+      if (!panel) return
+      var list = root.wsByMon[mon] || []
+      for (var w = 0; w < list.length; w++) {
+        var tiled = list[w].windows.filter(function(c) { return !c.floating && c.address !== root.dragWin.address })
+        if (tiled.length === 0) {
+          var item = panel.tileAt(w)
+          if (item) add(mon, item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
+          continue
+        }
+        tiled.forEach(function(c) {
+          ;[[0.15, 0.5], [0.85, 0.5], [0.5, 0.15], [0.5, 0.85]].forEach(function(f) {
+            var p = root.windowPoint(mon, w, c, f[0], f[1])
+            if (p) add(mon, p)
+          })
         })
-      })
-    }
-    for (var i = 0; i <= root.freeIds.length; i++) {
-      var box = root.boxItem(i)
-      if (box) out.push(box.mapToItem(panel.contentItem, box.width / 2, box.height / 2))
-    }
-    return out.map(function(p) { return { x: p.x, y: p.y } })
+      }
+      for (var i = 0; i <= root.freeIds.length; i++) {
+        var box = panel.boxAt(i)
+        if (box) add(mon, box.mapToItem(panel.contentItem, box.width / 2, box.height / 2))
+      }
+    })
+    return out
   }
 
   function endDrag() {
     root.keyGrab = false
     root.dragWin = null
+    root.dragMon = ""
     root.dropTarget = -1
     root.dropBox = null
     root.dropAt = null
   }
 
-  // Where the dragged window would land in workspace ws, in monitor-relative
-  // logical coordinates: the split window's half away from `side`, and the
-  // dragged window's half on it, 2 * gaps_in apart. An empty workspace (or
-  // one with only floating windows) gives it the whole usable area. Returns
-  // null when ws is not the drop target.
+  // Where the dragged window would land in workspace ws of monitor mon, in
+  // monitor-relative logical coordinates: the split window's half away from
+  // `side`, and the dragged window's half on it, 2 * gaps_in apart. An empty
+  // workspace (or one with only floating windows) gives it the whole usable
+  // area. Returns null when ws is not the drop target.
   //   { target: address of the window being split (or ""),
   //     targetRect: that window's new rect, newRect: the dragged window's }
-  function dropPreview(ws) {
-    if (!root.dragWin || root.dropTarget !== ws.id || !root.dropAt || !root.monitor) return null
-    var mon = root.monitor
+  function dropPreview(mon, ws) {
+    if (!root.dragWin || root.dragMon !== mon || root.dropTarget !== ws.id || !root.dropAt) return null
+    var m = root.monitorByName(mon)
+    if (!m) return null
     var g = root.splitGap
     var t = root.dropAt.target
     if (!t) {
-      var r = mon.reserved || [0, 0, 0, 0]
+      var r = m.reserved || [0, 0, 0, 0]
+      var s = root.logicalSize(m)
       return { target: "", targetRect: null, newRect: {
         x: r[0] + g, y: r[1] + g,
-        w: mon.width / mon.scale - r[0] - r[2] - 2 * g,
-        h: mon.height / mon.scale - r[1] - r[3] - 2 * g } }
+        w: s.w - r[0] - r[2] - 2 * g,
+        h: s.h - r[1] - r[3] - 2 * g } }
     }
-    var x = t.at[0] - mon.x, y = t.at[1] - mon.y, w = t.size[0], h = t.size[1]
+    var x = t.at[0] - m.x, y = t.at[1] - m.y, w = t.size[0], h = t.size[1]
     var hw = (w - g) / 2, hh = (h - g) / 2
     var first = { l: { x: x, y: y, w: hw, h: h }, u: { x: x, y: y, w: w, h: hh } }
     var second = { l: { x: x + hw + g, y: y, w: hw, h: h }, u: { x: x, y: y + hh + g, w: w, h: hh } }
@@ -604,552 +740,581 @@ Item {
       newRect: newFirst ? first[axis] : second[axis] }
   }
 
-  PanelWindow {
-    id: panel
-    visible: root.opened
-    screen: {
-      if (!root.monitor) return null
-      var screens = Quickshell.screens
-      for (var i = 0; i < screens.length; i++)
-        if (screens[i].name === root.monitor.name) return screens[i]
-      return null
+  // Keys reach only the focused monitor's overview, which hands them here.
+  function handleKey(event) {
+    var k = event.key
+    if (root.helpOpen && k !== Qt.Key_K) {
+      root.helpOpen = false
+      event.accepted = true
+      return
     }
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    WlrLayershell.namespace: "christeceno-4-finger-overview"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
-
-    Rectangle {
-      anchors.fill: parent
-      color: root.scrim
+    if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_K) root.helpOpen = !root.helpOpen
+    else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Left) root.moveWorkspace(-1, 0)
+    else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Right) root.moveWorkspace(1, 0)
+    else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Up) root.moveWorkspace(0, -1)
+    else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Down) root.moveWorkspace(0, 1)
+    else if (root.keyGrab && (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down))
+      root.grabStep(k === Qt.Key_Left ? -1 : k === Qt.Key_Right ? 1 : 0, k === Qt.Key_Up ? -1 : k === Qt.Key_Down ? 1 : 0)
+    else if (root.keyGrab && (k === Qt.Key_Return || k === Qt.Key_Enter)) root.finishDrag()
+    else if (k === Qt.Key_Escape) {
+      if (root.dragWin) root.endDrag()
+      else if (root.filterText) root.setFilter("")
+      else root.close()
     }
+    else if (k === Qt.Key_Left) root.moveSpatial(-1, 0)
+    else if (k === Qt.Key_Right) root.moveSpatial(1, 0)
+    else if (k === Qt.Key_Up) root.moveSpatial(0, -1)
+    else if (k === Qt.Key_Down) root.moveSpatial(0, 1)
+    else if (k === Qt.Key_Backtab) root.moveSequential(-1)
+    else if (k === Qt.Key_Tab) root.moveSequential((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+    else if (k === Qt.Key_Return || k === Qt.Key_Enter) root.activateSelection()
+    else if (k === Qt.Key_Backspace) root.setFilter(root.filterText.slice(0, -1))
+    else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127
+             && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)))
+      root.setFilter(root.filterText + event.text)
+    else return
+    event.accepted = true
+  }
 
-    MouseArea {
-      anchors.fill: parent
-      onClicked: root.close()
-    }
+  // One overview window per monitor.
+  Variants {
+    model: Quickshell.screens
 
-    Item {
-      id: keyCatcher
-      anchors.fill: parent
-      focus: true
+    delegate: PanelWindow {
+      id: panel
+      required property var modelData
+      readonly property string monName: modelData.name
+      readonly property var mon: root.monitorByName(monName)
+      readonly property var workspaces: root.wsByMon[monName] || []
+      readonly property bool isFocused: monName === root.focusedMon
 
-      // Printable keys go to the search, so navigation is arrows and Tab only.
-      Keys.onPressed: function(event) {
-        var k = event.key
-        if (root.helpOpen && k !== Qt.Key_K) {
-          root.helpOpen = false
-          event.accepted = true
-          return
-        }
-        if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_K) root.helpOpen = !root.helpOpen
-        else if (root.keyGrab && (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down))
-          root.grabStep(k === Qt.Key_Left ? -1 : k === Qt.Key_Right ? 1 : 0, k === Qt.Key_Up ? -1 : k === Qt.Key_Down ? 1 : 0)
-        else if (root.keyGrab && (k === Qt.Key_Return || k === Qt.Key_Enter)) root.finishDrag()
-        else if (k === Qt.Key_Escape) {
-          if (root.dragWin) root.endDrag()
-          else if (root.filterText) root.setFilter("")
-          else root.close()
-        }
-        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Left) root.moveWorkspace(-1, 0)
-        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Right) root.moveWorkspace(1, 0)
-        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Up) root.moveWorkspace(0, -1)
-        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Down) root.moveWorkspace(0, 1)
-        else if (k === Qt.Key_Left) root.moveSpatial(-1, 0)
-        else if (k === Qt.Key_Right) root.moveSpatial(1, 0)
-        else if (k === Qt.Key_Up) root.moveSpatial(0, -1)
-        else if (k === Qt.Key_Down) root.moveSpatial(0, 1)
-        else if (k === Qt.Key_Backtab) root.moveSequential(-1)
-        else if (k === Qt.Key_Tab) root.moveSequential((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
-        else if (k === Qt.Key_Return || k === Qt.Key_Enter) root.activateSelection()
-        else if (k === Qt.Key_Backspace) root.setFilter(root.filterText.slice(0, -1))
-        else if (event.text && event.text.length === 1 && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127
-                 && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)))
-          root.setFilter(root.filterText + event.text)
-        else return
-        event.accepted = true
+      function tileAt(i) { return tiles.itemAt(i) }
+      function boxAt(i) { return i < root.freeIds.length ? freeBoxes.itemAt(i) : plusBox }
+
+      Component.onCompleted: root.registerPanel(monName, panel)
+      Component.onDestruction: root.registerPanel(monName, null)
+
+      screen: modelData
+      visible: root.opened && mon !== null
+      anchors { top: true; bottom: true; left: true; right: true }
+      color: "transparent"
+      WlrLayershell.namespace: "christeceno-4-finger-overview"
+      WlrLayershell.layer: WlrLayer.Overlay
+      WlrLayershell.keyboardFocus: isFocused ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+      exclusionMode: ExclusionMode.Ignore
+
+      onVisibleChanged: if (visible && isFocused) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      onIsFocusedChanged: if (visible && isFocused) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+
+      Rectangle {
+        anchors.fill: parent
+        color: root.scrim
       }
-    }
 
-    // Logical monitor size: hyprctl reports physical pixels, windows are laid
-    // out in logical (scaled) coordinates.
-    readonly property real monW: root.monitor ? root.monitor.width / root.monitor.scale : 1
-    readonly property real monH: root.monitor ? root.monitor.height / root.monitor.scale : 1
-    readonly property int count: root.workspaces.length
-    readonly property int cols: count <= 3 ? Math.max(1, count) : Math.ceil(Math.sqrt(count))
-    readonly property int rows: Math.max(1, Math.ceil(count / cols))
-    readonly property real sideW: root.boxW + root.gap * 2
-    readonly property real tileW: Math.min(
-      (width * 0.92 - sideW - root.gap * (cols - 1)) / cols,
-      ((height * 0.82 - root.searchHeight - (root.gap + root.labelHeight) * rows) / rows) * monW / monH,
-      width * 0.4)
-    readonly property real tileH: tileW * monH / monW
-    readonly property real tileScale: tileW / monW
-    readonly property real boxH: root.boxW * monH / monW
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.close()
+      }
 
-    // Search box.
-    Rectangle {
-      id: searchBox
-      anchors.horizontalCenter: parent.horizontalCenter
-      anchors.top: parent.top
-      anchors.topMargin: parent.height * 0.05
-      width: Math.min(Style.space(520), parent.width * 0.5)
-      height: root.searchHeight
-      radius: root.radius
-      color: root.background
-      border.width: root.filterText ? Style.space(2) : 1
-      border.color: root.filterText ? root.accent : root.dimBorder
-      opacity: grid.opacity
+      Item {
+        id: keyCatcher
+        anchors.fill: parent
+        focus: true
+        Keys.onPressed: function(event) { root.handleKey(event) }
+      }
+
+      readonly property real monW: mon ? root.logicalSize(mon).w : 1
+      readonly property real monH: mon ? root.logicalSize(mon).h : 1
+      readonly property int count: workspaces.length
+      readonly property real sideW: root.boxW + root.gap * 2
+      // Tile width for a given column count, fitting the space left of the
+      // box column and below the search box.
+      function fitWidth(c) {
+        var r = Math.ceil(count / c)
+        return Math.min(
+          (width * 0.92 - sideW - root.gap * (c - 1)) / c,
+          ((height * 0.82 - root.searchHeight - (root.gap + root.labelHeight) * r) / r) * monW / monH,
+          width * 0.4)
+      }
+      // The column count that gives the largest tiles, so an ultrawide gets
+      // one long row and a tall monitor a column.
+      readonly property int cols: {
+        var best = 1
+        for (var c = 2; c <= Math.max(1, count); c++) if (fitWidth(c) > fitWidth(best)) best = c
+        return best
+      }
+      readonly property int rows: Math.max(1, Math.ceil(count / cols))
+      readonly property real tileW: fitWidth(cols)
+      readonly property real tileH: tileW * monH / monW
+      readonly property real tileScale: tileW / monW
+      readonly property real boxH: root.boxW * monH / monW
+
+      // Search box; the text is shared by every monitor.
+      Rectangle {
+        id: searchBox
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: parent.height * 0.05
+        width: Math.min(Style.space(520), parent.width * 0.5)
+        height: root.searchHeight
+        radius: root.radius
+        color: root.background
+        border.width: root.filterText ? Style.space(2) : 1
+        border.color: root.filterText ? root.accent : root.dimBorder
+        opacity: grid.opacity
+
+        Text {
+          anchors.fill: parent
+          anchors.leftMargin: Style.space(14)
+          anchors.rightMargin: Style.space(14)
+          verticalAlignment: Text.AlignVCenter
+          elide: Text.ElideLeft
+          text: root.filterText || (panel.isFocused ? "Type to search windows" : "Search from the focused monitor")
+          color: root.filterText ? root.foreground : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+      }
 
       Text {
-        anchors.fill: parent
-        anchors.leftMargin: Style.space(14)
-        anchors.rightMargin: Style.space(14)
-        verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideLeft
-        text: root.filterText || "Type to search windows"
-        color: root.filterText ? root.foreground : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
+        anchors.top: searchBox.bottom
+        anchors.topMargin: Style.space(6)
+        anchors.horizontalCenter: searchBox.horizontalCenter
+        visible: root.keyGrab
+        text: "Arrows move the window, Enter drops it, Esc cancels"
+        color: root.accent
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: Style.font.caption
       }
-    }
 
-    Text {
-      anchors.top: searchBox.bottom
-      anchors.topMargin: Style.space(6)
-      anchors.horizontalCenter: searchBox.horizontalCenter
-      visible: root.keyGrab
-      text: "Arrows move the window, Enter drops it, Esc cancels"
-      color: root.accent
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-    }
+      Text {
+        visible: panel.count === 0
+        anchors.centerIn: parent
+        anchors.horizontalCenterOffset: -panel.sideW / 2
+        text: "No windows on this monitor"
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
+      }
 
-    Text {
-      visible: panel.count === 0
-      anchors.centerIn: parent
-      anchors.horizontalCenterOffset: -panel.sideW / 2
-      text: "No windows on this monitor"
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.title
-    }
+      Flow {
+        id: grid
+        anchors.centerIn: parent
+        anchors.horizontalCenterOffset: -panel.sideW / 2
+        anchors.verticalCenterOffset: root.searchHeight / 2
+        width: panel.cols * panel.tileW + (panel.cols - 1) * root.gap
+        spacing: root.gap
+        opacity: root.opened && panel.mon ? 1 : 0
+        scale: root.opened && panel.mon ? 1 : 0.96
+        Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
-    Flow {
-      id: grid
-      anchors.centerIn: parent
-      anchors.horizontalCenterOffset: -panel.sideW / 2
-      anchors.verticalCenterOffset: root.searchHeight / 2
-      width: panel.cols * panel.tileW + (panel.cols - 1) * root.gap
-      spacing: root.gap
-      opacity: root.opened && root.monitor ? 1 : 0
-      scale: root.opened && root.monitor ? 1 : 0.96
-      Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
-      Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+        Repeater {
+          id: tiles
+          model: panel.workspaces
 
-      Repeater {
-        id: tiles
-        model: root.workspaces
+          delegate: Column {
+            id: tile
+            required property var modelData
+            required property int index
+            readonly property bool selected: root.selMon === panel.monName && index === root.selWs && root.selBox < 0
+            readonly property bool current: panel.mon && modelData.id === panel.mon.activeWorkspace.id
+            readonly property bool dropHere: root.dragWin !== null && root.dragMon === panel.monName && root.dropTarget === modelData.id
+            readonly property var preview: root.dropPreview(panel.monName, modelData)
+            spacing: Style.space(6)
 
-        delegate: Column {
-          id: tile
-          required property var modelData
-          required property int index
-          readonly property bool selected: index === root.selectedWs && root.selectedBox < 0
-          readonly property bool current: root.monitor && modelData.id === root.monitor.activeWorkspace.id
-          readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData.id
-          readonly property var preview: root.dropPreview(modelData)
-          spacing: Style.space(6)
+            Rectangle {
+              width: panel.tileW
+              height: panel.tileH
+              radius: root.radius
+              color: tile.dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
+              clip: true
+              border.width: tile.selected || tile.dropHere ? Style.space(3) : 1
+              border.color: tile.selected || tile.dropHere ? root.accent : root.dimBorder
 
-          Rectangle {
-            width: panel.tileW
-            height: panel.tileH
-            radius: root.radius
-            color: tile.dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
-            clip: true
-            border.width: tile.selected || tile.dropHere ? Style.space(3) : 1
-            border.color: tile.selected || tile.dropHere ? root.accent : root.dimBorder
+              Repeater {
+                model: tile.modelData.windows
 
-            Repeater {
-              model: tile.modelData.windows
+                delegate: Item {
+                  id: win
+                  required property var modelData
+                  required property int index
+                  readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
+                  readonly property bool selected: tile.selected && index === root.selWin
+                  readonly property bool dragged: root.dragWin !== null && root.dragWin.address === modelData.address
+                  readonly property var rect: tile.preview && tile.preview.target === modelData.address
+                    ? tile.preview.targetRect
+                    : { x: modelData.at[0] - panel.mon.x, y: modelData.at[1] - panel.mon.y, w: modelData.size[0], h: modelData.size[1] }
+                  x: rect.x * panel.tileScale
+                  y: rect.y * panel.tileScale
+                  width: rect.w * panel.tileScale
+                  height: rect.h * panel.tileScale
+                  Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                  z: selected ? 1 : 0
+                  opacity: win.dragged ? 0.3 : root.matches(modelData) ? 1 : 0.2
 
-              delegate: Item {
-                id: win
-                required property var modelData
-                required property int index
-                readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
-                readonly property bool selected: tile.selected && index === root.selectedWin
-                readonly property bool dragged: root.dragWin !== null && root.dragWin.address === modelData.address
-                readonly property var rect: tile.preview && tile.preview.target === modelData.address
-                  ? tile.preview.targetRect
-                  : { x: modelData.at[0] - root.monitor.x, y: modelData.at[1] - root.monitor.y, w: modelData.size[0], h: modelData.size[1] }
-                x: rect.x * panel.tileScale
-                y: rect.y * panel.tileScale
-                width: rect.w * panel.tileScale
-                height: rect.h * panel.tileScale
-                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                z: selected ? 1 : 0
-                opacity: win.dragged ? 0.3 : root.matches(modelData) ? 1 : 0.2
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Math.max(2, root.radius * panel.tileScale)
+                    color: Qt.darker(root.background, 1.3)
+                    border.width: 1
+                    border.color: root.dimBorder
+                  }
 
-                Rectangle {
-                  anchors.fill: parent
-                  radius: Math.max(2, root.radius * panel.tileScale)
-                  color: Qt.darker(root.background, 1.3)
-                  border.width: 1
-                  border.color: root.dimBorder
+                  ScreencopyView {
+                    anchors.fill: parent
+                    anchors.margins: 1
+                    captureSource: win.toplevel
+                    live: root.opened
+                  }
+
+                  // Selection highlight: accent tint and border drawn over the
+                  // preview, so it shows whatever the window contains.
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Math.max(2, root.radius * panel.tileScale)
+                    visible: win.selected && !root.dragWin
+                    color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+                    border.width: Style.space(3)
+                    border.color: root.accent
+                  }
+
+                  Text {
+                    visible: !win.toplevel
+                    anchors.centerIn: parent
+                    width: parent.width - 8
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                    text: win.modelData.class || win.modelData.title
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
                 }
+              }
+
+              // The slot the dragged window will take, opened up by the
+              // preview above.
+              Rectangle {
+                id: slot
+                visible: opacity > 0
+                opacity: tile.preview ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 160 } }
+                readonly property var r: tile.preview ? tile.preview.newRect : slot.lastRect
+                property var lastRect: ({ x: 0, y: 0, w: 0, h: 0 })
+                onRChanged: if (tile.preview) lastRect = tile.preview.newRect
+                x: r.x * panel.tileScale
+                y: r.y * panel.tileScale
+                width: r.w * panel.tileScale
+                height: r.h * panel.tileScale
+                z: 1
+                radius: Math.max(2, root.radius * panel.tileScale)
+                color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+                border.width: Style.space(2)
+                border.color: root.accent
 
                 ScreencopyView {
                   anchors.fill: parent
-                  anchors.margins: 1
-                  captureSource: win.toplevel
-                  live: root.opened
-                }
-
-                // Selection highlight: accent tint and border drawn over the
-                // preview, so it shows whatever the window contains.
-                Rectangle {
-                  anchors.fill: parent
-                  radius: Math.max(2, root.radius * panel.tileScale)
-                  visible: win.selected && !root.dragWin
-                  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
-                  border.width: Style.space(3)
-                  border.color: root.accent
-                }
-
-                Text {
-                  visible: !win.toplevel
-                  anchors.centerIn: parent
-                  width: parent.width - 8
-                  horizontalAlignment: Text.AlignHCenter
-                  elide: Text.ElideRight
-                  text: win.modelData.class || win.modelData.title
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                  anchors.margins: Style.space(2)
+                  opacity: 0.6
+                  captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
+                  live: slot.visible
                 }
               }
-            }
 
-            // The slot the dragged window will take, opened up by the
-            // preview above.
-            Rectangle {
-              id: slot
-              visible: opacity > 0
-              opacity: tile.preview ? 1 : 0
-              Behavior on opacity { NumberAnimation { duration: 160 } }
-              readonly property var r: tile.preview ? tile.preview.newRect : slot.lastRect
-              property var lastRect: ({ x: 0, y: 0, w: 0, h: 0 })
-              onRChanged: if (tile.preview) lastRect = tile.preview.newRect
-              x: r.x * panel.tileScale
-              y: r.y * panel.tileScale
-              width: r.w * panel.tileScale
-              height: r.h * panel.tileScale
-              z: 1
-              radius: Math.max(2, root.radius * panel.tileScale)
-              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
-              border.width: Style.space(2)
-              border.color: root.accent
-
-              ScreencopyView {
+              // One pointer handler per workspace, on top of the previews. It
+              // hit-tests the windows itself, topmost first, so hovering a
+              // window always selects it and hovering the gaps selects the
+              // workspace. It only reacts to movement, so opening the overview
+              // under a resting cursor keeps the focused window selected.
+              // Pressing a window and moving past a few pixels starts a drag;
+              // the press keeps the pointer grab, so the drag can leave the
+              // tile, and the monitor, for any other drop target.
+              MouseArea {
+                id: tileMouse
                 anchors.fill: parent
-                anchors.margins: Style.space(2)
-                opacity: 0.6
-                captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
-                live: slot.visible
+                z: 2
+                hoverEnabled: true
+                cursorShape: root.dragWin ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+
+                property int pressedWin: -1
+                property real pressX: 0
+                property real pressY: 0
+                property bool dragged: false
+
+                function windowAt(mx, my) {
+                  var wins = tile.modelData.windows
+                  for (var i = wins.length - 1; i >= 0; i--) {
+                    var x = (wins[i].at[0] - panel.mon.x) * panel.tileScale
+                    var y = (wins[i].at[1] - panel.mon.y) * panel.tileScale
+                    if (mx >= x && my >= y && mx < x + wins[i].size[0] * panel.tileScale && my < y + wins[i].size[1] * panel.tileScale)
+                      return i
+                  }
+                  return -1
+                }
+
+                onPressed: function(mouse) {
+                  pressedWin = mouse.button === Qt.LeftButton ? windowAt(mouse.x, mouse.y) : -1
+                  pressX = mouse.x
+                  pressY = mouse.y
+                  dragged = false
+                }
+
+                onPositionChanged: function(mouse) {
+                  if (pressed && pressedWin >= 0) {
+                    if (!dragged && Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY) > 8) {
+                      dragged = true
+                      root.startDrag(tile.modelData.windows[pressedWin])
+                    }
+                    if (dragged) {
+                      var p = mapToItem(panel.contentItem, mouse.x, mouse.y)
+                      root.updateDragFrom(panel.monName, p.x, p.y)
+                    }
+                    return
+                  }
+                  root.select(panel.monName, tile.index, windowAt(mouse.x, mouse.y))
+                }
+
+                onReleased: function(mouse) {
+                  if (dragged) root.finishDrag()
+                }
+
+                onCanceled: root.endDrag()
+
+                onClicked: function(mouse) {
+                  if (dragged) return
+                  var i = windowAt(mouse.x, mouse.y)
+                  var w = i >= 0 ? tile.modelData.windows[i] : null
+                  if (mouse.button === Qt.MiddleButton) {
+                    if (w) root.closeWindow(w.address)
+                  } else if (w) {
+                    root.focusWindow(w.address)
+                  } else {
+                    root.goToWorkspace(tile.modelData.id)
+                  }
+                }
               }
             }
 
-            // One pointer handler per workspace, on top of the previews. It
-            // hit-tests the windows itself, topmost first, so hovering a
-            // window always selects it and hovering the gaps selects the
-            // workspace. It only reacts to movement, so opening the overview
-            // under a resting cursor keeps the focused window selected.
-            // Pressing a window and moving past a few pixels starts a drag;
-            // the press keeps the pointer grab, so the drag can leave the
-            // tile for other tiles and the boxes on the right.
-            MouseArea {
-              id: tileMouse
-              anchors.fill: parent
-              z: 2
-              hoverEnabled: true
-              cursorShape: root.dragWin ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-              acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-
-              property int pressedWin: -1
-              property real pressX: 0
-              property real pressY: 0
-              property bool dragged: false
-
-              function windowAt(mx, my) {
-                var wins = tile.modelData.windows
-                for (var i = wins.length - 1; i >= 0; i--) {
-                  var x = (wins[i].at[0] - root.monitor.x) * panel.tileScale
-                  var y = (wins[i].at[1] - root.monitor.y) * panel.tileScale
-                  if (mx >= x && my >= y && mx < x + wins[i].size[0] * panel.tileScale && my < y + wins[i].size[1] * panel.tileScale)
-                    return i
-                }
-                return -1
-              }
-
-              onPressed: function(mouse) {
-                pressedWin = mouse.button === Qt.LeftButton ? windowAt(mouse.x, mouse.y) : -1
-                pressX = mouse.x
-                pressY = mouse.y
-                dragged = false
-              }
-
-              onPositionChanged: function(mouse) {
-                if (pressed && pressedWin >= 0) {
-                  if (!dragged && Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY) > 8) {
-                    dragged = true
-                    root.startDrag(tile.modelData.windows[pressedWin])
-                  }
-                  if (dragged) {
-                    var p = mapToItem(panel.contentItem, mouse.x, mouse.y)
-                    root.updateDrag(p.x, p.y)
-                  }
-                  return
-                }
-                root.select(tile.index, windowAt(mouse.x, mouse.y))
-              }
-
-              onReleased: function(mouse) {
-                if (dragged) root.finishDrag()
-              }
-
-              onCanceled: root.endDrag()
-
-              onClicked: function(mouse) {
-                if (dragged) return
-                var i = windowAt(mouse.x, mouse.y)
-                var w = i >= 0 ? tile.modelData.windows[i] : null
-                if (mouse.button === Qt.MiddleButton) {
-                  if (w) root.closeWindow(w.address)
-                } else if (w) {
-                  root.focusWindow(w.address)
-                } else {
-                  root.goToWorkspace(tile.modelData.id)
-                }
-              }
+            // Workspace number, plus the selected window's title under its
+            // workspace.
+            Text {
+              width: panel.tileW
+              height: root.labelHeight - Style.space(6)
+              horizontalAlignment: Text.AlignHCenter
+              elide: Text.ElideRight
+              text: tile.selected && root.selectedWindow
+                ? tile.modelData.name + "   " + (root.selectedWindow.title || root.selectedWindow.class)
+                : tile.modelData.name
+              color: tile.selected ? root.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: tile.current
             }
-          }
-
-          // Workspace number, plus the selected window's title under its
-          // workspace.
-          Text {
-            width: panel.tileW
-            height: root.labelHeight - Style.space(6)
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-            text: tile.selected && root.selectedWindow
-              ? tile.modelData.name + "   " + (root.selectedWindow.title || root.selectedWindow.class)
-              : tile.modelData.name
-            color: tile.selected ? root.accent : root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: tile.current
           }
         }
       }
-    }
 
-    // Unused workspaces and "+": click to go there, drop a window to move it.
-    Column {
-      id: side
-      // Anchored at the top so a box growing under a drag pushes only the
-      // boxes below it, and never slides out from under the cursor.
-      anchors.right: parent.right
-      anchors.rightMargin: root.gap
-      anchors.top: searchBox.bottom
-      anchors.topMargin: root.gap
-      spacing: Style.space(8)
-      opacity: grid.opacity
+      // Unused workspaces and "+": click to go there on this monitor, drop a
+      // window to move it there.
+      Column {
+        id: side
+        // Anchored at the top so a box growing under a drag pushes only the
+        // boxes below it, and never slides out from under the cursor.
+        anchors.right: parent.right
+        anchors.rightMargin: root.gap
+        anchors.top: searchBox.bottom
+        anchors.topMargin: root.gap
+        spacing: Style.space(8)
+        opacity: grid.opacity
 
-      Repeater {
-        id: freeBoxes
-        model: root.freeIds
+        Repeater {
+          id: freeBoxes
+          model: root.freeIds
 
-        delegate: Rectangle {
-          id: box
-          required property var modelData
-          required property int index
-          readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData
-          readonly property bool selected: root.selectedBox === index
+          delegate: Rectangle {
+            id: box
+            required property var modelData
+            required property int index
+            readonly property bool dropHere: root.dragWin !== null && root.dragMon === panel.monName && root.dropTarget === modelData
+            readonly property bool selected: root.selMon === panel.monName && root.selBox === index
+            anchors.right: parent.right
+            width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
+            height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
+            Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            radius: root.radius
+            color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
+            border.width: dropHere || selected ? Style.space(3) : boxMouse.containsMouse ? Style.space(2) : 1
+            border.color: dropHere || selected || boxMouse.containsMouse ? root.accent : root.dimBorder
+
+            // Hidden while the box holds a dragged window.
+            Text {
+              anchors.centerIn: parent
+              visible: !box.dropHere
+              text: box.modelData
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.6)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            MouseArea {
+              id: boxMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onPositionChanged: if (!root.dragWin) root.selectBox(panel.monName, box.index)
+              onClicked: root.goToNewWorkspace(box.modelData, panel.monName)
+            }
+          }
+        }
+
+        Rectangle {
+          id: plusBox
+          readonly property bool dropHere: root.dragWin !== null && root.dragMon === panel.monName && root.dropTarget === root.newId
+          readonly property bool selected: root.selMon === panel.monName && root.selBox === root.freeIds.length
           anchors.right: parent.right
           width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
           height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
           Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
           Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
           radius: root.radius
-          color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
-          border.width: dropHere || selected ? Style.space(3) : boxMouse.containsMouse ? Style.space(2) : 1
-          border.color: dropHere || selected || boxMouse.containsMouse ? root.accent : root.dimBorder
+          color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : "transparent"
+          border.width: dropHere || selected ? Style.space(3) : plusMouse.containsMouse ? Style.space(2) : 1
+          border.color: dropHere || selected || plusMouse.containsMouse ? root.accent : root.dimBorder
 
-          // Hidden while the box holds a dragged window.
           Text {
             anchors.centerIn: parent
-            visible: !box.dropHere
-            text: box.modelData
-            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.6)
+            text: "+"
+            color: root.foreground
             font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            font.pixelSize: Style.font.title
           }
 
           MouseArea {
-            id: boxMouse
+            id: plusMouse
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onPositionChanged: if (!root.dragWin) root.selectBox(box.index)
-            onClicked: root.goToWorkspace(box.modelData)
+            onPositionChanged: if (!root.dragWin) root.selectBox(panel.monName, root.freeIds.length)
+            onClicked: root.goToNewWorkspace(root.newId, panel.monName)
           }
         }
       }
 
-      Rectangle {
-        id: plusBox
-        readonly property bool dropHere: root.dragWin !== null && root.dropTarget === root.newId
-        readonly property bool selected: root.selectedBox === root.freeIds.length
-        anchors.right: parent.right
-        width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
-        height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
-        Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-        Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-        radius: root.radius
-        color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : "transparent"
-        border.width: dropHere || selected ? Style.space(3) : plusMouse.containsMouse ? Style.space(2) : 1
-        border.color: dropHere || selected || plusMouse.containsMouse ? root.accent : root.dimBorder
+      // Shortcut sheet, toggled with SUPER+K on the focused monitor; any
+      // other key or a click closes it.
+      Item {
+        anchors.fill: parent
+        visible: root.helpOpen && panel.isFocused
+        z: 20
 
-        Text {
-          anchors.centerIn: parent
-          text: "+"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
+        Rectangle {
+          anchors.fill: parent
+          color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.6)
         }
 
         MouseArea {
-          id: plusMouse
           anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onPositionChanged: if (!root.dragWin) root.selectBox(root.freeIds.length)
-          onClicked: root.goToWorkspace(root.newId)
-        }
-      }
-    }
-
-    // Shortcut sheet, toggled with SUPER+K; any other key or a click closes it.
-    Item {
-      anchors.fill: parent
-      visible: root.helpOpen
-      z: 20
-
-      Rectangle {
-        anchors.fill: parent
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.6)
-      }
-
-      MouseArea {
-        anchors.fill: parent
-        onClicked: root.helpOpen = false
-      }
-
-      Rectangle {
-        anchors.centerIn: parent
-        width: helpGrid.width + Style.space(48)
-        height: helpTitle.height + helpGrid.height + Style.space(64)
-        radius: root.radius
-        color: root.background
-        border.width: 1
-        border.color: root.dimBorder
-
-        Text {
-          id: helpTitle
-          anchors.top: parent.top
-          anchors.topMargin: Style.space(24)
-          anchors.horizontalCenter: parent.horizontalCenter
-          text: "Overview shortcuts"
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.title
-          font.bold: true
+          onClicked: root.helpOpen = false
         }
 
-        Grid {
-          id: helpGrid
-          anchors.top: helpTitle.bottom
-          anchors.topMargin: Style.space(16)
-          anchors.horizontalCenter: parent.horizontalCenter
-          columns: 2
-          columnSpacing: Style.space(32)
-          rowSpacing: Style.space(8)
+        Rectangle {
+          anchors.centerIn: parent
+          width: helpGrid.width + Style.space(48)
+          height: helpTitle.height + helpGrid.height + Style.space(64)
+          radius: root.radius
+          color: root.background
+          border.width: 1
+          border.color: root.dimBorder
 
-          Repeater {
-            model: [
-              "Arrow keys", "Select the nearest window in that direction",
-              "SUPER + arrow keys", "Jump to the neighbouring workspace or box",
-              "SUPER + SHIFT + arrow keys", "Grab the selected window; arrows move it, Enter drops",
-              "Tab / Shift + Tab", "Step through every window",
-              "Enter", "Focus the selected window, or go to the selected box",
-              "Type", "Search by title, app or program (Backspace edits)",
-              "Esc", "Cancel drag, clear search, then close",
-              "Click window", "Focus it",
-              "Click empty space", "Switch to that workspace",
-              "Middle-click window", "Close it",
-              "Drag window", "Place it beside the window under the cursor",
-              "Drag to a box or +", "Move it to that workspace",
-              "4-finger swipe up / SUPER + TAB", "Open or close",
-              "SUPER + K", "Show or hide this sheet"
-            ]
+          Text {
+            id: helpTitle
+            anchors.top: parent.top
+            anchors.topMargin: Style.space(24)
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: "Overview shortcuts"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.title
+            font.bold: true
+          }
 
-            delegate: Text {
-              required property var modelData
-              required property int index
-              text: modelData
-              color: index % 2 === 0 ? root.accent : root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: index % 2 === 0
+          Grid {
+            id: helpGrid
+            anchors.top: helpTitle.bottom
+            anchors.topMargin: Style.space(16)
+            anchors.horizontalCenter: parent.horizontalCenter
+            columns: 2
+            columnSpacing: Style.space(32)
+            rowSpacing: Style.space(8)
+
+            Repeater {
+              model: [
+                "Arrow keys", "Select the nearest window in that direction, on any monitor",
+                "SUPER + arrow keys", "Jump to the neighbouring workspace or box",
+                "SUPER + SHIFT + arrow keys", "Grab the selected window; arrows move it, Enter drops",
+                "Tab / Shift + Tab", "Step through every window",
+                "Enter", "Focus the selected window, or go to the selected box",
+                "Type", "Search by title, app or program (Backspace edits)",
+                "Esc", "Cancel drag, clear search, then close",
+                "Click window", "Focus it",
+                "Click empty space", "Switch to that workspace",
+                "Middle-click window", "Close it",
+                "Drag window", "Place it beside the window under the cursor, on any monitor",
+                "Drag to a box or +", "Move it to that workspace, on that monitor",
+                "4-finger swipe up / SUPER + TAB", "Open or close",
+                "SUPER + K", "Show or hide this sheet"
+              ]
+
+              delegate: Text {
+                required property var modelData
+                required property int index
+                text: modelData
+                color: index % 2 === 0 ? root.accent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: index % 2 === 0
+              }
             }
           }
         }
       }
-    }
 
-    // The window being dragged, following the cursor.
-    Rectangle {
-      id: dragProxy
-      visible: root.dragWin !== null
-      readonly property real w: root.dragWin ? Math.min(root.dragWin.size[0] * panel.tileScale, panel.tileW * 0.6) : 0
-      readonly property real h: root.dragWin ? w * root.dragWin.size[1] / root.dragWin.size[0] : 0
-      // Follows the cursor, except over a box, where it settles in the
-      // middle of the box growing around it.
-      x: root.dropBox ? side.x + root.dropBox.x + (root.dropBox.width - w) / 2 : root.dragX - w / 2
-      y: root.dropBox ? side.y + root.dropBox.y + (root.dropBox.height - h) / 2 : root.dragY - h / 2
-      Behavior on x { enabled: root.dropBox !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-      Behavior on y { enabled: root.dropBox !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-      width: w
-      height: h
-      z: 10
-      radius: Math.max(2, root.radius * panel.tileScale)
-      color: Qt.darker(root.background, 1.3)
-      border.width: Style.space(2)
-      border.color: root.accent
-      // Over a workspace the slot shows the window, so the proxy steps back.
-      opacity: root.dropTarget > 0 && !root.dropBox ? 0.45 : 0.9
+      // The window being dragged, following the cursor on whichever monitor
+      // it is over.
+      Rectangle {
+        id: dragProxy
+        visible: root.dragWin !== null && root.dragMon === panel.monName
+        readonly property real w: root.dragWin ? Math.min(root.dragWin.size[0] * panel.tileScale, panel.tileW * 0.6) : 0
+        readonly property real h: root.dragWin ? w * root.dragWin.size[1] / root.dragWin.size[0] : 0
+        readonly property var box: root.dragMon === panel.monName ? root.dropBox : null
+        // Follows the cursor, except over a box, where it settles in the
+        // middle of the box growing around it.
+        x: box ? side.x + box.x + (box.width - w) / 2 : root.dragX - w / 2
+        y: box ? side.y + box.y + (box.height - h) / 2 : root.dragY - h / 2
+        Behavior on x { enabled: dragProxy.box !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        Behavior on y { enabled: dragProxy.box !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        width: w
+        height: h
+        z: 10
+        radius: Math.max(2, root.radius * panel.tileScale)
+        color: Qt.darker(root.background, 1.3)
+        border.width: Style.space(2)
+        border.color: root.accent
+        // Over a workspace the slot shows the window, so the proxy steps back.
+        opacity: root.dropTarget > 0 && !box ? 0.45 : 0.9
 
-      ScreencopyView {
-        anchors.fill: parent
-        anchors.margins: Style.space(2)
-        captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
-        live: dragProxy.visible
+        ScreencopyView {
+          anchors.fill: parent
+          anchors.margins: Style.space(2)
+          captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
+          live: dragProxy.visible
+        }
       }
     }
   }
