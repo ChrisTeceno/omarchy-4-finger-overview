@@ -45,7 +45,7 @@ o.bind("SUPER + TAB", "Overview", "omarchy-shell shell toggle christeceno.4-fing
 
 ## Usage
 
-One window is selected at a time. It starts on the focused window and follows the mouse or the arrow keys; its title shows under its workspace. Typing filters windows by title or app name: matches stay bright, the rest dim, and the arrow keys skip over them.
+One window is selected at a time. It starts on the focused window and follows the mouse or the arrow keys; its title shows under its workspace. Typing filters windows by title, app name, or the programs running inside them (so `herdr` or `claude` finds the terminal they run in): matches stay bright, the rest dim, and the arrow keys skip over them.
 
 | Input | Action |
 | --- | --- |

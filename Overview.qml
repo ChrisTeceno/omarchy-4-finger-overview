@@ -91,10 +91,12 @@ Item {
   }
 
   // Monitors, clients and workspaces in one process, so the layout is built
-  // from a single consistent snapshot.
+  // from a single consistent snapshot. The process table comes along so the
+  // search can match programs running inside a window (herdr or claude in a
+  // terminal), not just its title and class.
   Process {
     id: clientsProc
-    command: ["sh", "-c", "printf '{\"monitors\":%s,\"clients\":%s,\"workspaces\":%s}' \"$(hyprctl monitors -j)\" \"$(hyprctl clients -j)\" \"$(hyprctl workspaces -j)\""]
+    command: ["sh", "-c", "printf '{\"monitors\":%s,\"clients\":%s,\"workspaces\":%s,\"ps\":%s}' \"$(hyprctl monitors -j)\" \"$(hyprctl clients -j)\" \"$(hyprctl workspaces -j)\" \"$(ps -e -o pid=,ppid=,comm= | jq -Rs .)\""]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.build(text)
@@ -116,6 +118,29 @@ Item {
     var mon = data.monitors.find(function(m) { return m.focused }) || data.monitors[0]
     if (!mon) return
 
+    // Program names in each window's process tree, two levels down from the
+    // window's own process: terminal, then shell or multiplexer, then what
+    // runs in it.
+    var children = {}, comm = {}
+    String(data.ps || "").split("\n").forEach(function(line) {
+      var m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)
+      if (!m) return
+      comm[m[1]] = m[3]
+      ;(children[m[2]] = children[m[2]] || []).push(m[1])
+    })
+    function programs(pid) {
+      var names = [], level = [String(pid)]
+      for (var depth = 0; depth <= 2 && level.length; depth++) {
+        var next = []
+        level.forEach(function(p) {
+          if (comm[p]) names.push(comm[p])
+          next = next.concat(children[p] || [])
+        })
+        level = next
+      }
+      return names.join(" ")
+    }
+
     var byId = {}
     var used = {}
     var highest = 10
@@ -125,6 +150,7 @@ Item {
       used[c.workspace.id] = true
       highest = Math.max(highest, c.workspace.id)
       if (c.monitor !== mon.id || !c.mapped || c.hidden) continue
+      c.programs = programs(c.pid)
       if (!byId[c.workspace.id]) byId[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, windows: [] }
       byId[c.workspace.id].windows.push(c)
     }
@@ -188,12 +214,14 @@ Item {
     root.selectedWin = winIndex
   }
 
-  // Search: case-insensitive substring of the window title or class.
+  // Search: case-insensitive substring of the window title, class, or the
+  // names of the programs running in it.
   function matches(c) {
     if (!root.filterText) return true
     var needle = root.filterText.toLowerCase()
-    return String(c.title || "").toLowerCase().indexOf(needle) >= 0
-      || String(c.class || "").toLowerCase().indexOf(needle) >= 0
+    return [c.title, c.class, c.initialClass, c.programs].some(function(f) {
+      return String(f || "").toLowerCase().indexOf(needle) >= 0
+    })
   }
 
   function setFilter(text) {
