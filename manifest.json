@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "christeceno.4-finger-overview",
+  "name": "4-Finger Overview",
+  "version": "1.0.0",
+  "author": "Chris Teceno",
+  "description": "Workspace overview for the focused monitor: every workspace with at least one window, with live previews",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overview.qml"
+  }
+}
