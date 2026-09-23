@@ -17,7 +17,7 @@ import qs.Commons
 // nearest window in that direction, across workspaces and monitors. Enter or
 // a click focuses it; clicking the empty part of a workspace switches to that
 // workspace. Typing filters the windows by title, class, and the programs
-// running in them. Keys go to the focused monitor's overview.
+// running in them, from whichever monitor has keyboard focus.
 //
 // Dragging a window onto another workspace (on any monitor), an unused box,
 // or "+" moves it there without leaving the overview, which then re-reads the
@@ -800,11 +800,16 @@ Item {
       color: "transparent"
       WlrLayershell.namespace: "christeceno-4-finger-overview"
       WlrLayershell.layer: WlrLayer.Overlay
-      WlrLayershell.keyboardFocus: isFocused ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+      // Every monitor's overview is exclusive, not just the focused one's:
+      // while any layer holds exclusive keyboard focus, Hyprland sends
+      // pointer input only to exclusive layers, so a non-exclusive overview
+      // on another monitor could not be clicked. Keys reach whichever one
+      // Hyprland focuses (a click moves it), and all of them hand keys to
+      // root.handleKey.
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
       exclusionMode: ExclusionMode.Ignore
 
-      onVisibleChanged: if (visible && isFocused) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-      onIsFocusedChanged: if (visible && isFocused) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      onVisibleChanged: if (visible) Qt.callLater(function() { keyCatcher.forceActiveFocus() })
 
       Rectangle {
         anchors.fill: parent
@@ -869,7 +874,7 @@ Item {
           anchors.rightMargin: Style.space(14)
           verticalAlignment: Text.AlignVCenter
           elide: Text.ElideLeft
-          text: root.filterText || (panel.isFocused ? "Type to search windows" : "Search from the focused monitor")
+          text: root.filterText || "Type to search windows"
           color: root.filterText ? root.foreground : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
