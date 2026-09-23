@@ -50,12 +50,12 @@ Item {
 
   // Drag state. dragMon is the monitor under the cursor and dragX/dragY are
   // in that monitor's overview coordinates; dropTarget is the workspace id
-  // under the cursor, or -1.
+  // under the cursor (negative for a scratchpad), or 0 for none.
   property var dragWin: null
   property string dragMon: ""
   property real dragX: 0
   property real dragY: 0
-  property int dropTarget: -1
+  property int dropTarget: 0
   property var dropBox: null     // unused/"+" box under the cursor, which grows around the window
   // Over a workspace tile: the tiled window the drop will split, and on which
   // side ("l", "r", "u", "d") the dragged window goes. target is null when
@@ -257,16 +257,21 @@ Item {
     })
     for (var i = 0; i < data.clients.length; i++) {
       var c = data.clients[i]
-      if (c.workspace.id <= 0) continue
-      used[c.workspace.id] = true
-      highest = Math.max(highest, c.workspace.id)
+      // Special workspaces (scratchpads) are listed too, after the regular
+      // ones; the overview's own parking spot for drags is not.
+      var special = c.workspace.id < 0 && /^special:/.test(c.workspace.name) && c.workspace.name !== "special:overview-drag"
+      if (c.workspace.id <= 0 && !special) continue
+      if (!special) {
+        used[c.workspace.id] = true
+        highest = Math.max(highest, c.workspace.id)
+      }
       var mon = monName[c.monitor]
       if (!mon || !c.mapped || c.hidden || c.visible === false) continue
       c.programs = programs(c.pid)
       c.tabs = (c.grouped || []).map(function(a) { return byAddr[a] }).filter(function(t) { return t })
       c.tabs.forEach(function(t) { if (t !== c) t.programs = programs(t.pid) })
       var group = byMon[mon]
-      if (!group[c.workspace.id]) group[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, windows: [] }
+      if (!group[c.workspace.id]) group[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, special: special, windows: [] }
       group[c.workspace.id].windows.push(c)
     }
 
@@ -276,7 +281,10 @@ Item {
     var lists = {}
     for (var name in byMon) {
       var g = byMon[name]
-      lists[name] = Object.keys(g).map(function(k) { return g[k] }).sort(function(a, b) { return a.id - b.id })
+      lists[name] = Object.keys(g).map(function(k) { return g[k] }).sort(function(a, b) {
+        if (a.special !== b.special) return a.special ? 1 : -1
+        return a.special ? a.name.localeCompare(b.name) : a.id - b.id
+      })
       lists[name].forEach(function(w) { w.windows.sort(function(a, b) { return layer(a) - layer(b) }) })
     }
 
@@ -341,9 +349,16 @@ Item {
     onExited: refreshTimer.restart()
   }
 
-  function goToWorkspace(id) {
+  // Switch to workspace id; a scratchpad is toggled open on monitor `mon`.
+  function goToWorkspace(id, mon) {
     root.close()
-    root.dispatch("hl.dsp.focus({ workspace = \"" + id + "\" })")
+    var ws = null
+    for (var name in root.wsByMon) ws = ws || root.wsByMon[name].find(function(x) { return x.id === id })
+    if (ws && ws.special)
+      root.runBatch(["hl.dsp.focus({ monitor = \"" + (mon || root.focusedMon) + "\" })",
+                     "hl.dsp.workspace.toggle_special(\"" + ws.name.replace(/^special:/, "") + "\")"])
+    else
+      root.dispatch("hl.dsp.focus({ workspace = \"" + id + "\" })")
   }
 
   // An unused or new workspace, created on monitor `mon`: Hyprland creates a
@@ -441,7 +456,7 @@ Item {
     else if (root.selectedWindow) root.focusWindow(root.selectedWindow.address)
     else {
       var ws = (root.wsByMon[root.selMon] || [])[root.selWs]
-      if (ws) root.goToWorkspace(ws.id)
+      if (ws) root.goToWorkspace(ws.id, root.selMon)
     }
   }
 
@@ -523,8 +538,8 @@ Item {
     var m = root.monitorByName(mon)
     if (!item || !m) return null
     return item.mapToItem(panel.contentItem,
-      (c.at[0] - m.x + c.size[0] * fx) * panel.tileScale,
-      (c.at[1] - m.y + c.size[1] * fy) * panel.tileScale)
+      (c.at[0] - m.x + c.size[0] * fx) * item.sc,
+      (c.at[1] - m.y + c.size[1] * fy) * item.sc)
   }
 
   function forEachMonitor(fn) {
@@ -554,7 +569,7 @@ Item {
       for (var w = 0; w < list.length; w++) {
         var item = panel ? panel.tileAt(w) : null
         if (!item) continue
-        var p = root.toGlobal(mon, item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
+        var p = root.toGlobal(mon, item.mapToItem(panel.contentItem, item.tW / 2, item.tH / 2))
         out.push({ mon: mon, ws: w, win: -1, x: p.x, y: p.y })
       }
     })
@@ -643,7 +658,7 @@ Item {
   // nothing.
   function targetAt(mon, px, py) {
     var panel = root.panels[mon]
-    if (!panel) return { id: -1, box: null }
+    if (!panel) return { id: 0, box: null }
     function hit(item) {
       if (!item) return false
       var p = item.mapFromItem(panel.contentItem, px, py)
@@ -671,12 +686,12 @@ Item {
         return { id: root.boxId(bestJ), box: panel.boxAt(bestJ) }
       }
     }
-    return { id: -1, box: null }
+    return { id: 0, box: null }
   }
 
   function startDrag(client) {
     root.dragWin = client
-    root.dropTarget = -1
+    root.dropTarget = 0
   }
 
   // Pointer moved during a drag, at a point in monitor `fromMon`'s overview.
@@ -702,7 +717,7 @@ Item {
     var t = root.targetAt(mon, px, py)
     root.dropTarget = t.id
     root.dropBox = t.box
-    root.dropAt = t.id > 0 && !t.box ? root.splitAt(mon, t.id, px, py) : null
+    root.dropAt = t.id !== 0 && !t.box ? root.splitAt(mon, t.id, px, py) : null
   }
 
   // Which tiled window of workspace wsId on monitor mon a drop at a panel
@@ -716,9 +731,11 @@ Item {
     var item = panel ? panel.tileAt(i) : null
     var m = root.monitorByName(mon)
     if (i < 0 || !item || !m) return null
+    // A scratchpad takes a plain move: Hyprland tiles it there on its own.
+    if (list[i].special) return { target: null, side: "" }
     var local = item.mapFromItem(panel.contentItem, px, py)
-    var lx = local.x / panel.tileScale + m.x
-    var ly = local.y / panel.tileScale + m.y
+    var lx = local.x / item.sc + m.x
+    var ly = local.y / item.sc + m.y
     var dragged = root.dragWin
     if (!dragged) return null
     var tiled = list[i].windows.filter(function(c) { return !c.floating && c.address !== dragged.address })
@@ -757,8 +774,14 @@ Item {
     var box = root.dropBox
     var mon = root.dragMon
     root.endDrag()
-    if (!w || target <= 0) return
-    if (!box && at && at.target) root.placeWindow(w, target, at.target, at.side)
+    if (!w || target === 0) return
+    var dest = null
+    for (var name in root.wsByMon) dest = dest || root.wsByMon[name].find(function(x) { return x.id === target })
+    if (dest && dest.special) {
+      if (target !== w.workspace.id)
+        root.runBatch(["hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + dest.name + "\", follow = false })"].concat(root.restoreSteps()))
+    }
+    else if (!box && at && at.target) root.placeWindow(w, target, at.target, at.side)
     else if (target !== w.workspace.id) root.moveWindow(w, target, mon)
   }
 
@@ -804,7 +827,7 @@ Item {
         var tiled = list[w].windows.filter(function(c) { return !c.floating && c.address !== root.dragWin.address })
         if (tiled.length === 0) {
           var item = panel.tileAt(w)
-          if (item) add(mon, item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
+          if (item) add(mon, item.mapToItem(panel.contentItem, item.tW / 2, item.tH / 2))
           continue
         }
         tiled.forEach(function(c) {
@@ -827,7 +850,7 @@ Item {
     root.keyGrab = false
     root.dragWin = null
     root.dragMon = ""
-    root.dropTarget = -1
+    root.dropTarget = 0
     root.dropBox = null
     root.dropAt = null
   }
@@ -969,6 +992,17 @@ Item {
       event.accepted = true
       return
     }
+    var arrowDx = k === Qt.Key_Left ? -1 : k === Qt.Key_Right ? 1 : 0
+    var arrowDy = k === Qt.Key_Up ? -1 : k === Qt.Key_Down ? 1 : 0
+    var isArrow = arrowDx !== 0 || arrowDy !== 0
+    // SUPER+SHIFT+arrow grabs; it reaches the overview directly when
+    // Hyprland has nothing bound to it (otherwise the README's forwarder
+    // sends a grab payload).
+    if (isArrow && (event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier)) {
+      root.grabStep(arrowDx, arrowDy)
+      event.accepted = true
+      return
+    }
     if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_K) root.helpOpen = !root.helpOpen
     else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Left) root.moveWorkspace(-1, 0)
     else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Right) root.moveWorkspace(1, 0)
@@ -1007,9 +1041,12 @@ Item {
       readonly property string monName: modelData.name
       readonly property var mon: root.monitorByName(monName)
       readonly property var workspaces: root.wsByMon[monName] || []
+      readonly property var normals: workspaces.filter(function(w) { return !w.special })
+      readonly property var specials: workspaces.filter(function(w) { return w.special })
+      readonly property int normalCount: normals.length
       readonly property bool isFocused: monName === root.focusedMon
 
-      function tileAt(i) { return tiles.itemAt(i) }
+      function tileAt(i) { return i < normalCount ? tiles.itemAt(i) : specTiles.itemAt(i - normalCount) }
       function boxAt(i) { return freeBoxes.itemAt(i) }
 
       Component.onCompleted: root.registerPanel(monName, panel)
@@ -1051,7 +1088,9 @@ Item {
 
       readonly property real monW: mon ? root.logicalSize(mon).w : 1
       readonly property real monH: mon ? root.logicalSize(mon).h : 1
-      readonly property int count: workspaces.length
+      readonly property int count: normalCount
+      // Height kept below the grid for the scratchpad row, when there is one.
+      readonly property real specReserve: specials.length ? height * 0.2 : 0
       // Boxes scale with the monitor, so they stay a real target on a large
       // screen, and never go below the base size.
       readonly property real boxW: Math.max(root.boxW, Math.round(width * 0.05))
@@ -1062,7 +1101,7 @@ Item {
         var r = Math.ceil(count / c)
         return Math.min(
           (width * 0.92 - sideW - root.gap * (c - 1)) / c,
-          ((height * 0.82 - root.searchHeight - (root.gap + root.labelHeight) * r) / r) * monW / monH,
+          ((height * 0.82 - specReserve - root.searchHeight - (root.gap + root.labelHeight) * r) / r) * monW / monH,
           width * 0.4)
       }
       // The column count that gives the largest tiles, so an ultrawide gets
@@ -1076,6 +1115,9 @@ Item {
       readonly property real tileW: fitWidth(cols)
       readonly property real tileH: tileW * monH / monW
       readonly property real tileScale: tileW / monW
+      // Scratchpad tiles: half a workspace tile, fitted to the reserved row.
+      readonly property real specW: Math.min(tileW * 0.5, (specReserve - root.labelHeight - root.gap) * monW / monH,
+        specials.length ? (width * 0.92 - sideW - root.gap * (specials.length - 1)) / specials.length : 0)
       readonly property real boxH: boxW * monH / monW
       // A box under a drag grows to this size (keeping the monitor's shape)
       // and the dragged window shrinks into it.
@@ -1130,11 +1172,254 @@ Item {
         font.pixelSize: Style.font.title
       }
 
+      // One workspace tile: a scaled copy of the monitor with its windows.
+      // Shared by the regular grid and the scratchpad row.
+      Component {
+        id: tileDelegate
+
+        Column {
+          id: tile
+          required property var modelData
+          required property int index
+          // Scratchpads sit after the regular workspaces in the monitor's
+          // list, so their index there is offset by the regular count.
+          readonly property int wsIndex: modelData.special ? panel.normalCount + index : index
+          // Tile size: scratchpads are drawn smaller, in their own row.
+          readonly property real tW: modelData.special ? panel.specW : panel.tileW
+          readonly property real tH: tW * panel.monH / panel.monW
+          readonly property real sc: tW / panel.monW
+          readonly property bool selected: root.selMon === panel.monName && wsIndex === root.selWs && root.selBox < 0
+          readonly property bool current: panel.mon && modelData.id === panel.mon.activeWorkspace.id
+          readonly property bool dropHere: root.dragWin !== null && root.dragMon === panel.monName && root.dropTarget === modelData.id
+          readonly property var preview: root.dropPreview(panel.monName, modelData)
+          readonly property string label: String(modelData.name).replace(/^special:/, "")
+          spacing: Style.space(6)
+
+          Rectangle {
+            width: tile.tW
+            height: tile.tH
+            radius: root.radius
+            color: tile.dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
+            clip: true
+            border.width: tile.selected || tile.dropHere ? Style.space(3) : 1
+            border.color: tile.selected || tile.dropHere ? root.accent : root.dimBorder
+
+            Repeater {
+              model: tile.modelData.windows
+
+              delegate: Item {
+                id: win
+                required property var modelData
+                required property int index
+                readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
+                readonly property bool selected: tile.selected && index === root.selWin
+                readonly property bool dragged: root.dragWin !== null && root.dragWin.address === modelData.address
+                readonly property var rect: tile.preview && tile.preview.rects[modelData.address]
+                  ? tile.preview.rects[modelData.address]
+                  : { x: modelData.at[0] - panel.mon.x, y: modelData.at[1] - panel.mon.y, w: modelData.size[0], h: modelData.size[1] }
+                x: rect.x * tile.sc
+                y: rect.y * tile.sc
+                width: rect.w * tile.sc
+                height: rect.h * tile.sc
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                z: selected ? 1 : 0
+                // The dragged window is lifted out: its workspace closes the gap.
+                opacity: win.dragged ? 0.08 : root.matches(modelData) ? 1 : 0.2
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: Math.max(2, root.radius * tile.sc)
+                  color: Qt.darker(root.background, 1.3)
+                  border.width: 1
+                  border.color: root.dimBorder
+                }
+
+                ScreencopyView {
+                  anchors.fill: parent
+                  anchors.margins: 1
+                  captureSource: win.toplevel
+                  live: root.opened
+                }
+
+                // Selection highlight: accent tint and border drawn over the
+                // preview, so it shows whatever the window contains.
+                Rectangle {
+                  anchors.fill: parent
+                  radius: Math.max(2, root.radius * tile.sc)
+                  visible: win.selected && !root.dragWin
+                  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+                  border.width: Style.space(3)
+                  border.color: root.accent
+                }
+
+                // Tab count for a window group, which shows its active tab.
+                Rectangle {
+                  visible: (win.modelData.tabs || []).length > 1
+                  anchors.top: parent.top
+                  anchors.right: parent.right
+                  anchors.margins: Style.space(4)
+                  width: tabText.implicitWidth + Style.space(10)
+                  height: tabText.implicitHeight + Style.space(4)
+                  radius: height / 2
+                  color: root.background
+                  border.width: 1
+                  border.color: root.accent
+
+                  Text {
+                    id: tabText
+                    anchors.centerIn: parent
+                    text: (win.modelData.tabs || []).length + " tabs"
+                    color: root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  visible: !win.toplevel
+                  anchors.centerIn: parent
+                  width: parent.width - 8
+                  horizontalAlignment: Text.AlignHCenter
+                  elide: Text.ElideRight
+                  text: win.modelData.class || win.modelData.title
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            // The slot the dragged window will take, opened up by the
+            // preview above.
+            Rectangle {
+              id: slot
+              visible: opacity > 0
+              readonly property bool shown: !!(tile.preview && tile.preview.newRect)
+              opacity: shown ? 1 : 0
+              Behavior on opacity { NumberAnimation { duration: 160 } }
+              readonly property var r: shown ? tile.preview.newRect : slot.lastRect
+              property var lastRect: ({ x: 0, y: 0, w: 0, h: 0 })
+              onRChanged: if (shown) lastRect = tile.preview.newRect
+              x: r.x * tile.sc
+              y: r.y * tile.sc
+              width: r.w * tile.sc
+              height: r.h * tile.sc
+              z: 1
+              radius: Math.max(2, root.radius * tile.sc)
+              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+              border.width: Style.space(2)
+              border.color: root.accent
+
+              ScreencopyView {
+                anchors.fill: parent
+                anchors.margins: Style.space(2)
+                opacity: 0.6
+                captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
+                live: slot.visible
+              }
+            }
+
+            // One pointer handler per workspace, on top of the previews. It
+            // hit-tests the windows itself, topmost first, so hovering a
+            // window always selects it and hovering the gaps selects the
+            // workspace. It only reacts to movement, so opening the overview
+            // under a resting cursor keeps the focused window selected.
+            // Pressing a window and moving past a few pixels starts a drag;
+            // the press keeps the pointer grab, so the drag can leave the
+            // tile, and the monitor, for any other drop target.
+            MouseArea {
+              id: tileMouse
+              anchors.fill: parent
+              z: 2
+              hoverEnabled: true
+              cursorShape: root.dragWin ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+              acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+
+              property int pressedWin: -1
+              property real pressX: 0
+              property real pressY: 0
+              property bool dragged: false
+
+              function windowAt(mx, my) {
+                var wins = tile.modelData.windows
+                for (var i = wins.length - 1; i >= 0; i--) {
+                  var x = (wins[i].at[0] - panel.mon.x) * tile.sc
+                  var y = (wins[i].at[1] - panel.mon.y) * tile.sc
+                  if (mx >= x && my >= y && mx < x + wins[i].size[0] * tile.sc && my < y + wins[i].size[1] * tile.sc)
+                    return i
+                }
+                return -1
+              }
+
+              onPressed: function(mouse) {
+                pressedWin = mouse.button === Qt.LeftButton ? windowAt(mouse.x, mouse.y) : -1
+                pressX = mouse.x
+                pressY = mouse.y
+                dragged = false
+              }
+
+              onPositionChanged: function(mouse) {
+                if (pressed && pressedWin >= 0) {
+                  if (!dragged && Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY) > 8) {
+                    dragged = true
+                    root.startDrag(tile.modelData.windows[pressedWin])
+                  }
+                  if (dragged) {
+                    var p = mapToItem(panel.contentItem, mouse.x, mouse.y)
+                    root.updateDragFrom(panel.monName, p.x, p.y)
+                  }
+                  return
+                }
+                root.select(panel.monName, tile.wsIndex, windowAt(mouse.x, mouse.y))
+              }
+
+              onReleased: function(mouse) {
+                if (dragged) root.finishDrag()
+              }
+
+              onCanceled: root.endDrag()
+
+              onClicked: function(mouse) {
+                if (dragged) return
+                var i = windowAt(mouse.x, mouse.y)
+                var w = i >= 0 ? tile.modelData.windows[i] : null
+                if (mouse.button === Qt.MiddleButton) {
+                  if (w) root.closeWindow(w.address)
+                } else if (w) {
+                  root.focusWindow(w.address)
+                } else {
+                  root.goToWorkspace(tile.modelData.id, panel.monName)
+                }
+              }
+            }
+          }
+
+          // Workspace number, plus the selected window's title under its
+          // workspace.
+          Text {
+            width: tile.tW
+            height: root.labelHeight - Style.space(6)
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            text: tile.selected && root.selectedWindow
+              ? tile.label + "   " + (root.selectedWindow.title || root.selectedWindow.class)
+              : tile.label
+            color: tile.selected ? root.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: tile.current
+          }
+        }
+      }
+
       Flow {
         id: grid
         anchors.centerIn: parent
         anchors.horizontalCenterOffset: -panel.sideW / 2
-        anchors.verticalCenterOffset: root.searchHeight / 2
+        anchors.verticalCenterOffset: root.searchHeight / 2 - panel.specReserve / 2
         width: panel.cols * panel.tileW + (panel.cols - 1) * root.gap
         spacing: root.gap
         opacity: root.opened && panel.mon ? 1 : 0
@@ -1144,236 +1429,26 @@ Item {
 
         Repeater {
           id: tiles
-          model: panel.workspaces
+          model: panel.normals
+          delegate: tileDelegate
+        }
+      }
 
-          delegate: Column {
-            id: tile
-            required property var modelData
-            required property int index
-            readonly property bool selected: root.selMon === panel.monName && index === root.selWs && root.selBox < 0
-            readonly property bool current: panel.mon && modelData.id === panel.mon.activeWorkspace.id
-            readonly property bool dropHere: root.dragWin !== null && root.dragMon === panel.monName && root.dropTarget === modelData.id
-            readonly property var preview: root.dropPreview(panel.monName, modelData)
-            spacing: Style.space(6)
+      // Scratchpads (special workspaces) with windows, in a row below the
+      // regular workspaces, labelled by name.
+      Row {
+        id: specRow
+        visible: panel.specials.length > 0
+        anchors.top: grid.bottom
+        anchors.topMargin: root.gap
+        anchors.horizontalCenter: grid.horizontalCenter
+        spacing: root.gap
+        opacity: grid.opacity
 
-            Rectangle {
-              width: panel.tileW
-              height: panel.tileH
-              radius: root.radius
-              color: tile.dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
-              clip: true
-              border.width: tile.selected || tile.dropHere ? Style.space(3) : 1
-              border.color: tile.selected || tile.dropHere ? root.accent : root.dimBorder
-
-              Repeater {
-                model: tile.modelData.windows
-
-                delegate: Item {
-                  id: win
-                  required property var modelData
-                  required property int index
-                  readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
-                  readonly property bool selected: tile.selected && index === root.selWin
-                  readonly property bool dragged: root.dragWin !== null && root.dragWin.address === modelData.address
-                  readonly property var rect: tile.preview && tile.preview.rects[modelData.address]
-                    ? tile.preview.rects[modelData.address]
-                    : { x: modelData.at[0] - panel.mon.x, y: modelData.at[1] - panel.mon.y, w: modelData.size[0], h: modelData.size[1] }
-                  x: rect.x * panel.tileScale
-                  y: rect.y * panel.tileScale
-                  width: rect.w * panel.tileScale
-                  height: rect.h * panel.tileScale
-                  Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                  Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                  Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                  Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
-                  z: selected ? 1 : 0
-                  // The dragged window is lifted out: its workspace closes the gap.
-                  opacity: win.dragged ? 0.08 : root.matches(modelData) ? 1 : 0.2
-
-                  Rectangle {
-                    anchors.fill: parent
-                    radius: Math.max(2, root.radius * panel.tileScale)
-                    color: Qt.darker(root.background, 1.3)
-                    border.width: 1
-                    border.color: root.dimBorder
-                  }
-
-                  ScreencopyView {
-                    anchors.fill: parent
-                    anchors.margins: 1
-                    captureSource: win.toplevel
-                    live: root.opened
-                  }
-
-                  // Selection highlight: accent tint and border drawn over the
-                  // preview, so it shows whatever the window contains.
-                  Rectangle {
-                    anchors.fill: parent
-                    radius: Math.max(2, root.radius * panel.tileScale)
-                    visible: win.selected && !root.dragWin
-                    color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
-                    border.width: Style.space(3)
-                    border.color: root.accent
-                  }
-
-                  // Tab count for a window group, which shows its active tab.
-                  Rectangle {
-                    visible: (win.modelData.tabs || []).length > 1
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.margins: Style.space(4)
-                    width: tabText.implicitWidth + Style.space(10)
-                    height: tabText.implicitHeight + Style.space(4)
-                    radius: height / 2
-                    color: root.background
-                    border.width: 1
-                    border.color: root.accent
-
-                    Text {
-                      id: tabText
-                      anchors.centerIn: parent
-                      text: (win.modelData.tabs || []).length + " tabs"
-                      color: root.accent
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  Text {
-                    visible: !win.toplevel
-                    anchors.centerIn: parent
-                    width: parent.width - 8
-                    horizontalAlignment: Text.AlignHCenter
-                    elide: Text.ElideRight
-                    text: win.modelData.class || win.modelData.title
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-              }
-
-              // The slot the dragged window will take, opened up by the
-              // preview above.
-              Rectangle {
-                id: slot
-                visible: opacity > 0
-                readonly property bool shown: !!(tile.preview && tile.preview.newRect)
-                opacity: shown ? 1 : 0
-                Behavior on opacity { NumberAnimation { duration: 160 } }
-                readonly property var r: shown ? tile.preview.newRect : slot.lastRect
-                property var lastRect: ({ x: 0, y: 0, w: 0, h: 0 })
-                onRChanged: if (shown) lastRect = tile.preview.newRect
-                x: r.x * panel.tileScale
-                y: r.y * panel.tileScale
-                width: r.w * panel.tileScale
-                height: r.h * panel.tileScale
-                z: 1
-                radius: Math.max(2, root.radius * panel.tileScale)
-                color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
-                border.width: Style.space(2)
-                border.color: root.accent
-
-                ScreencopyView {
-                  anchors.fill: parent
-                  anchors.margins: Style.space(2)
-                  opacity: 0.6
-                  captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
-                  live: slot.visible
-                }
-              }
-
-              // One pointer handler per workspace, on top of the previews. It
-              // hit-tests the windows itself, topmost first, so hovering a
-              // window always selects it and hovering the gaps selects the
-              // workspace. It only reacts to movement, so opening the overview
-              // under a resting cursor keeps the focused window selected.
-              // Pressing a window and moving past a few pixels starts a drag;
-              // the press keeps the pointer grab, so the drag can leave the
-              // tile, and the monitor, for any other drop target.
-              MouseArea {
-                id: tileMouse
-                anchors.fill: parent
-                z: 2
-                hoverEnabled: true
-                cursorShape: root.dragWin ? Qt.ClosedHandCursor : Qt.PointingHandCursor
-                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-
-                property int pressedWin: -1
-                property real pressX: 0
-                property real pressY: 0
-                property bool dragged: false
-
-                function windowAt(mx, my) {
-                  var wins = tile.modelData.windows
-                  for (var i = wins.length - 1; i >= 0; i--) {
-                    var x = (wins[i].at[0] - panel.mon.x) * panel.tileScale
-                    var y = (wins[i].at[1] - panel.mon.y) * panel.tileScale
-                    if (mx >= x && my >= y && mx < x + wins[i].size[0] * panel.tileScale && my < y + wins[i].size[1] * panel.tileScale)
-                      return i
-                  }
-                  return -1
-                }
-
-                onPressed: function(mouse) {
-                  pressedWin = mouse.button === Qt.LeftButton ? windowAt(mouse.x, mouse.y) : -1
-                  pressX = mouse.x
-                  pressY = mouse.y
-                  dragged = false
-                }
-
-                onPositionChanged: function(mouse) {
-                  if (pressed && pressedWin >= 0) {
-                    if (!dragged && Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY) > 8) {
-                      dragged = true
-                      root.startDrag(tile.modelData.windows[pressedWin])
-                    }
-                    if (dragged) {
-                      var p = mapToItem(panel.contentItem, mouse.x, mouse.y)
-                      root.updateDragFrom(panel.monName, p.x, p.y)
-                    }
-                    return
-                  }
-                  root.select(panel.monName, tile.index, windowAt(mouse.x, mouse.y))
-                }
-
-                onReleased: function(mouse) {
-                  if (dragged) root.finishDrag()
-                }
-
-                onCanceled: root.endDrag()
-
-                onClicked: function(mouse) {
-                  if (dragged) return
-                  var i = windowAt(mouse.x, mouse.y)
-                  var w = i >= 0 ? tile.modelData.windows[i] : null
-                  if (mouse.button === Qt.MiddleButton) {
-                    if (w) root.closeWindow(w.address)
-                  } else if (w) {
-                    root.focusWindow(w.address)
-                  } else {
-                    root.goToWorkspace(tile.modelData.id)
-                  }
-                }
-              }
-            }
-
-            // Workspace number, plus the selected window's title under its
-            // workspace.
-            Text {
-              width: panel.tileW
-              height: root.labelHeight - Style.space(6)
-              horizontalAlignment: Text.AlignHCenter
-              elide: Text.ElideRight
-              text: tile.selected && root.selectedWindow
-                ? tile.modelData.name + "   " + (root.selectedWindow.title || root.selectedWindow.class)
-                : tile.modelData.name
-              color: tile.selected ? root.accent : root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: tile.current
-            }
-          }
+        Repeater {
+          id: specTiles
+          model: panel.specials
+          delegate: tileDelegate
         }
       }
 
@@ -1573,7 +1648,7 @@ Item {
         border.width: Style.space(2)
         border.color: root.accent
         // Over a workspace the slot shows the window, so the proxy steps back.
-        opacity: root.dropTarget > 0 && !box ? 0.45 : 0.9
+        opacity: root.dropTarget !== 0 && !box ? 0.45 : 0.9
 
         ScreencopyView {
           anchors.fill: parent

@@ -35,6 +35,12 @@ hl.gesture({ fingers = 4, direction = "down", action = function() hl.exec_cmd("o
 
 Hyprland reloads the file on save. Check for mistakes with `hyprctl configerrors`.
 
+Optionally skip Hyprland's fade on the overview's layers, as Omarchy does for its own overlays; it opens a full-screen layer on every monitor, so this trims the work when it opens:
+
+```lua
+hl.layer_rule({ match = { namespace = "christeceno-4-finger-overview" }, no_anim = true, animation = "none" })
+```
+
 To open it from the keyboard instead, bind a key in `~/.config/hypr/bindings.lua`:
 
 ```lua
@@ -98,7 +104,7 @@ One window is selected at a time. It starts on the focused window and follows th
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
 | SUPER + arrow keys | Jump to the neighbouring workspace, unused box or "+" (needs the forwarder above) |
-| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop slots (each side of every window, empty workspaces, the unused boxes and "+"); after that, plain arrows keep moving it, Enter drops it and Esc cancels (needs the forwarder above) |
+| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop slots (works directly when Hyprland has nothing bound to it; otherwise use the forwarder above) (each side of every window, empty workspaces, the unused boxes and "+"); after that, plain arrows keep moving it, Enter drops it and Esc cancels (needs the forwarder above) |
 | SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 
@@ -114,7 +120,7 @@ Restart the shell after an update: this plugin stays loaded, and the shell's hot
 
 ## Notes
 
-- Only regular workspaces are shown. Special workspaces (such as the scratchpad) are skipped, and a scratchpad that was open stays open after a drop.
+- Scratchpads (special workspaces) that hold windows show as a row of smaller tiles under the regular workspaces of the monitor they belong to, labelled by name. Click one to open it on that monitor, drag windows into and out of it, and search reaches them. A scratchpad that was open stays open after a drop.
 - A tab group shows as its active tab with a tab count, and search matches any of its tabs. Dragging a group moves the whole group, as Hyprland does.
 - Dropping a window into a workspace with a fullscreen or maximized window takes that window out of fullscreen, so the split is visible.
 - The overview follows windows opening, closing and moving while it is showing, and keeps the selection where it was.
