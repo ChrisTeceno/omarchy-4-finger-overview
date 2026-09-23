@@ -2,7 +2,9 @@
 
 A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger swipe up on the trackpad, similar to Mission Control on macOS.
 
-It shows only the workspaces on the **focused monitor** that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Empty workspaces and workspaces on other monitors are left out.
+It shows only the workspaces on the **focused monitor** that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Workspaces on other monitors are left out. A column on the right lists the unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new workspace.
+
+Drag a window onto another workspace, an unused box, or "+" to move it there. The overview stays open and redraws with the new layout.
 
 It runs as an overlay plugin inside the Omarchy shell (Quickshell), so it picks up your theme's menu colors and font and needs no extra process.
 
@@ -41,19 +43,22 @@ o.bind("SUPER + TAB", "Overview", "omarchy-shell shell toggle christeceno.4-fing
 
 ## Usage
 
-One window is selected at a time. It starts on the focused window and follows the mouse or the keyboard; its title shows under its workspace.
+One window is selected at a time. It starts on the focused window and follows the mouse or the arrow keys; its title shows under its workspace. Typing filters windows by title or app name: matches stay bright, the rest dim, and the arrow keys skip over them.
 
 | Input | Action |
 | --- | --- |
 | 4-finger swipe up | Open |
-| 4-finger swipe down, Esc, click the background | Close |
+| 4-finger swipe down, click the background | Close |
+| Esc | Cancel a drag, then clear the search, then close |
+| Type | Search windows (Backspace edits) |
 | Hover a window | Select it |
-| Click a window, or Enter/Space | Focus the selected window |
+| Click a window, or Enter | Focus the selected window |
 | Click the empty part of a workspace | Switch to that workspace |
+| Click an unused box or "+" | Switch to that workspace, or a new one |
+| Drag a window | Move it to the workspace, unused box or "+" it is dropped on |
 | Middle-click a window | Close it |
-| Arrow keys, h/j/k/l | Select the nearest window in that direction, across workspaces |
+| Arrow keys | Select the nearest window in that direction, across workspaces |
 | Tab, Shift+Tab | Step through every window in order |
-| 1 to 9, 0 | Switch to workspace 1 to 10 |
 
 ## Update and remove
 
