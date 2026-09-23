@@ -41,25 +41,29 @@ o.bind("SUPER + TAB", "Overview", "omarchy-shell shell toggle christeceno.4-fing
 
 ## Usage
 
+One window is selected at a time. It starts on the focused window and follows the mouse or the keyboard; its title shows under its workspace.
+
 | Input | Action |
 | --- | --- |
 | 4-finger swipe up | Open |
 | 4-finger swipe down, Esc, click the background | Close |
-| Click a workspace | Switch to it |
-| Click a window | Focus that window |
-| Arrow keys, h/j/k/l, Tab | Move the selection |
-| Enter | Switch to the selected workspace |
-
-The current workspace's label is bold, and the selected workspace has an accent border.
+| Hover a window | Select it |
+| Click a window, or Enter/Space | Focus the selected window |
+| Click the empty part of a workspace | Switch to that workspace |
+| Middle-click a window | Close it |
+| Arrow keys, h/j/k/l | Select the nearest window in that direction, across workspaces |
+| Tab, Shift+Tab | Step through every window in order |
+| 1 to 9, 0 | Switch to workspace 1 to 10 |
 
 ## Update and remove
 
 ```bash
 omarchy plugin update christeceno.4-finger-overview
+omarchy restart shell
 omarchy plugin remove christeceno.4-finger-overview
 ```
 
-Remove the gesture lines from `input.lua` as well when uninstalling.
+Restart the shell after an update: this plugin stays loaded, and the shell's hot reload does not replace a loaded plugin's code. Remove the gesture lines from `input.lua` as well when uninstalling.
 
 ## Notes
 

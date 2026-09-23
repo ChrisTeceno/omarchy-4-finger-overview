@@ -7,8 +7,12 @@ import qs.Commons
 
 // Workspace overview for the focused monitor. Shows every regular workspace on
 // that monitor holding at least one window, each as a scaled-down copy of the
-// monitor with live previews of its windows. Click a workspace (or press
-// Enter on it) to switch there; click a window to focus it.
+// monitor with live previews of its windows.
+//
+// One window is selected at a time: it starts on the focused window, follows
+// the mouse, and moves with the arrow keys to the nearest window in that
+// direction, across workspaces. Enter or a click focuses it; clicking the
+// empty part of a workspace switches to that workspace.
 //
 // Summoned by a 4-finger swipe (see README) through
 // `omarchy-shell shell summon christeceno.4-finger-overview '{}'`.
@@ -18,16 +22,25 @@ Item {
   property bool opened: false
   property var monitor: null     // hyprctl monitors entry for the focused monitor
   property var workspaces: []    // [{ id, name, windows: [client, ...] }]
-  property int selectedIndex: 0
+  property int selectedWs: 0     // index into workspaces
+  property int selectedWin: -1   // index into workspaces[selectedWs].windows, -1 for none
 
-  property color scrim: Color.menu.scrim
+  // Darker than the menu scrim: the previews are busy, and a see-through
+  // backdrop makes the desktop behind them read as more windows.
+  property color scrim: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.88)
   property color background: Color.menu.background
   property color foreground: Color.menu.text
   property color border: Color.menu.border
-  property color accent: Color.menu.selectedBackground
+  property color accent: Color.accent
   property string fontFamily: Style.font.menuFamily
   readonly property int radius: Style.cornerRadius
   readonly property int gap: Style.space(24)
+  readonly property int labelHeight: Style.font.body + Style.space(12)
+
+  readonly property var selectedWindow: {
+    var ws = root.workspaces[root.selectedWs]
+    return ws && root.selectedWin >= 0 ? ws.windows[root.selectedWin] : null
+  }
 
   function open(payloadJson) {
     root.opened = true
@@ -54,6 +67,13 @@ Item {
     }
   }
 
+  // Re-read windows shortly after closing one, once Hyprland has unmapped it.
+  Timer {
+    id: refreshTimer
+    interval: 250
+    onTriggered: clientsProc.running = true
+  }
+
   function build(raw) {
     var data
     try { data = JSON.parse(raw) } catch (e) { console.warn("overview: bad hyprctl output", e); return }
@@ -74,8 +94,15 @@ Item {
 
     root.monitor = mon
     root.workspaces = list
-    var current = list.findIndex(function(w) { return w.id === mon.activeWorkspace.id })
-    root.selectedIndex = current >= 0 ? current : 0
+
+    // Start on the focused window (focusHistoryID 0), else the first window
+    // of the active workspace.
+    root.selectedWs = Math.max(0, list.findIndex(function(w) { return w.id === mon.activeWorkspace.id }))
+    root.selectedWin = list.length > 0 ? 0 : -1
+    for (var w = 0; w < list.length; w++) {
+      var idx = list[w].windows.findIndex(function(c) { return c.focusHistoryID === 0 })
+      if (idx >= 0) { root.selectedWs = w; root.selectedWin = idx }
+    }
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -93,6 +120,16 @@ Item {
     root.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
   }
 
+  function activateSelection() {
+    if (root.selectedWindow) root.focusWindow(root.selectedWindow.address)
+    else if (root.workspaces[root.selectedWs]) root.goToWorkspace(root.workspaces[root.selectedWs].id)
+  }
+
+  function select(wsIndex, winIndex) {
+    root.selectedWs = wsIndex
+    root.selectedWin = winIndex
+  }
+
   // Wayland toplevel handle for a Hyprland window address, for screencopy.
   function toplevelFor(address) {
     var list = ToplevelManager.toplevels.values
@@ -103,9 +140,50 @@ Item {
     return null
   }
 
-  function move(delta) {
-    if (root.workspaces.length === 0) return
-    root.selectedIndex = (root.selectedIndex + delta + root.workspaces.length) % root.workspaces.length
+  // Every window with its center in overview coordinates, in reading order.
+  function windowCenters() {
+    var out = []
+    for (var w = 0; w < root.workspaces.length; w++) {
+      var tileX = (w % panel.cols) * (panel.tileW + root.gap)
+      var tileY = Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap)
+      var wins = root.workspaces[w].windows
+      for (var i = 0; i < wins.length; i++) {
+        out.push({
+          ws: w, win: i,
+          x: tileX + (wins[i].at[0] - root.monitor.x + wins[i].size[0] / 2) * panel.tileScale,
+          y: tileY + (wins[i].at[1] - root.monitor.y + wins[i].size[1] / 2) * panel.tileScale
+        })
+      }
+    }
+    return out
+  }
+
+  // Move the selection to the nearest window in a direction (dx, dy one of
+  // -1/0/1), preferring windows in line with the current one.
+  function moveSpatial(dx, dy) {
+    var all = root.windowCenters()
+    var from = all.find(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
+    if (!from) { if (all.length > 0) root.select(all[0].ws, all[0].win); return }
+
+    var best = null, bestScore = Infinity
+    for (var i = 0; i < all.length; i++) {
+      var p = all[i]
+      var along = (p.x - from.x) * dx + (p.y - from.y) * dy
+      if (along <= 1) continue
+      var across = Math.abs((p.x - from.x) * dy) + Math.abs((p.y - from.y) * dx)
+      var score = along + across * 2
+      if (score < bestScore) { bestScore = score; best = p }
+    }
+    if (best) root.select(best.ws, best.win)
+  }
+
+  // Tab order: every window in reading order, wrapping.
+  function moveSequential(delta) {
+    var all = root.windowCenters()
+    if (all.length === 0) return
+    var at = all.findIndex(function(p) { return p.ws === root.selectedWs && p.win === root.selectedWin })
+    var next = all[(Math.max(0, at) + delta + all.length) % all.length]
+    root.select(next.ws, next.win)
   }
 
   PanelWindow {
@@ -141,11 +219,17 @@ Item {
       focus: true
 
       Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_Escape) root.close()
-        else if (event.key === Qt.Key_Left || event.key === Qt.Key_H || event.key === Qt.Key_Up || event.key === Qt.Key_K) root.move(-1)
-        else if (event.key === Qt.Key_Right || event.key === Qt.Key_L || event.key === Qt.Key_Down || event.key === Qt.Key_J || event.key === Qt.Key_Tab) root.move(1)
-        else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.workspaces.length > 0)
-          root.goToWorkspace(root.workspaces[root.selectedIndex].id)
+        var k = event.key
+        if (k === Qt.Key_Escape) root.close()
+        else if (k === Qt.Key_Left || k === Qt.Key_H) root.moveSpatial(-1, 0)
+        else if (k === Qt.Key_Right || k === Qt.Key_L) root.moveSpatial(1, 0)
+        else if (k === Qt.Key_Up || k === Qt.Key_K) root.moveSpatial(0, -1)
+        else if (k === Qt.Key_Down || k === Qt.Key_J) root.moveSpatial(0, 1)
+        else if (k === Qt.Key_Backtab) root.moveSequential(-1)
+        else if (k === Qt.Key_Tab) root.moveSequential((event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+        else if (k === Qt.Key_Return || k === Qt.Key_Enter || k === Qt.Key_Space) root.activateSelection()
+        else if (k >= Qt.Key_1 && k <= Qt.Key_9) root.goToWorkspace(k - Qt.Key_0)
+        else if (k === Qt.Key_0) root.goToWorkspace(10)
         else return
         event.accepted = true
       }
@@ -160,7 +244,7 @@ Item {
     readonly property int rows: Math.max(1, Math.ceil(count / cols))
     readonly property real tileW: Math.min(
       (width * 0.9 - root.gap * (cols - 1)) / cols,
-      ((height * 0.85 - root.gap * (rows - 1)) / rows) * monW / monH,
+      ((height * 0.85 - (root.gap + root.labelHeight) * rows) / rows) * monW / monH,
       width * 0.4)
     readonly property real tileH: tileW * monH / monW
     readonly property real tileScale: tileW / monW
@@ -175,9 +259,14 @@ Item {
     }
 
     Flow {
+      id: grid
       anchors.centerIn: parent
       width: panel.cols * panel.tileW + (panel.cols - 1) * root.gap
       spacing: root.gap
+      opacity: root.opened && root.monitor ? 1 : 0
+      scale: root.opened && root.monitor ? 1 : 0.96
+      Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+      Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
 
       Repeater {
         model: root.workspaces
@@ -186,7 +275,7 @@ Item {
           id: tile
           required property var modelData
           required property int index
-          readonly property bool selected: index === root.selectedIndex
+          readonly property bool selected: index === root.selectedWs
           readonly property bool current: root.monitor && modelData.id === root.monitor.activeWorkspace.id
           spacing: Style.space(6)
 
@@ -197,14 +286,7 @@ Item {
             color: root.background
             clip: true
             border.width: tile.selected ? Style.space(3) : 1
-            border.color: tile.selected ? root.accent : root.border
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              onEntered: root.selectedIndex = tile.index
-              onClicked: root.goToWorkspace(tile.modelData.id)
-            }
+            border.color: tile.selected ? root.accent : Qt.rgba(root.border.r, root.border.g, root.border.b, 0.3)
 
             Repeater {
               model: tile.modelData.windows
@@ -212,18 +294,21 @@ Item {
               delegate: Item {
                 id: win
                 required property var modelData
+                required property int index
                 readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
+                readonly property bool selected: tile.selected && index === root.selectedWin
                 x: (modelData.at[0] - root.monitor.x) * panel.tileScale
                 y: (modelData.at[1] - root.monitor.y) * panel.tileScale
                 width: modelData.size[0] * panel.tileScale
                 height: modelData.size[1] * panel.tileScale
+                z: selected ? 1 : 0
 
                 Rectangle {
                   anchors.fill: parent
                   radius: Math.max(2, root.radius * panel.tileScale)
                   color: Qt.darker(root.background, 1.3)
                   border.width: 1
-                  border.color: root.border
+                  border.color: Qt.rgba(root.border.r, root.border.g, root.border.b, 0.3)
                 }
 
                 ScreencopyView {
@@ -233,14 +318,14 @@ Item {
                   live: root.opened
                 }
 
-                // Hover highlight: accent tint and border drawn over the
+                // Selection highlight: accent tint and border drawn over the
                 // preview, so it shows whatever the window contains.
                 Rectangle {
                   anchors.fill: parent
                   radius: Math.max(2, root.radius * panel.tileScale)
-                  visible: winMouse.containsMouse
-                  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-                  border.width: Style.space(2)
+                  visible: win.selected
+                  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+                  border.width: Style.space(3)
                   border.color: root.accent
                 }
 
@@ -256,22 +341,60 @@ Item {
                   font.pixelSize: Style.font.caption
                 }
 
-                MouseArea {
-                  id: winMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onEntered: root.selectedIndex = tile.index
-                  onClicked: root.focusWindow(win.modelData.address)
+              }
+            }
+
+            // One pointer handler per workspace, on top of the previews. It
+            // hit-tests the windows itself, topmost first, so hovering a
+            // window always selects it and hovering the gaps selects the
+            // workspace. It only reacts to movement, so opening the overview
+            // under a resting cursor keeps the focused window selected.
+            MouseArea {
+              anchors.fill: parent
+              z: 2
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+
+              function windowAt(mx, my) {
+                var wins = tile.modelData.windows
+                for (var i = wins.length - 1; i >= 0; i--) {
+                  var x = (wins[i].at[0] - root.monitor.x) * panel.tileScale
+                  var y = (wins[i].at[1] - root.monitor.y) * panel.tileScale
+                  if (mx >= x && my >= y && mx < x + wins[i].size[0] * panel.tileScale && my < y + wins[i].size[1] * panel.tileScale)
+                    return i
+                }
+                return -1
+              }
+
+              onPositionChanged: function(mouse) { root.select(tile.index, windowAt(mouse.x, mouse.y)) }
+              onClicked: function(mouse) {
+                var i = windowAt(mouse.x, mouse.y)
+                var w = i >= 0 ? tile.modelData.windows[i] : null
+                if (mouse.button === Qt.MiddleButton) {
+                  if (!w) return
+                  root.dispatch("hl.dsp.window.close({ window = \"address:" + w.address + "\" })")
+                  refreshTimer.restart()
+                } else if (w) {
+                  root.focusWindow(w.address)
+                } else {
+                  root.goToWorkspace(tile.modelData.id)
                 }
               }
             }
           }
 
+          // Workspace number, plus the selected window's title under its
+          // workspace.
           Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: tile.modelData.name
-            color: root.foreground
+            width: panel.tileW
+            height: root.labelHeight - Style.space(6)
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            text: tile.selected && root.selectedWindow
+              ? tile.modelData.name + "   " + (root.selectedWindow.title || root.selectedWindow.class)
+              : tile.modelData.name
+            color: tile.selected ? root.accent : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: tile.current
