@@ -18,7 +18,9 @@ import qs.Commons
 // windows by title and class.
 //
 // Dragging a window onto another workspace, an unused box, or "+" moves it
-// there without leaving the overview, which then re-reads the layout.
+// there without leaving the overview, which then re-reads the layout. While
+// dragging, a box grows around the window, and a workspace previews the split
+// the window will land in, with its windows sliding over to make room.
 //
 // Summoned by a 4-finger swipe (see README) through
 // `omarchy-shell shell summon christeceno.4-finger-overview '{}'`.
@@ -40,6 +42,7 @@ Item {
   property real dragX: 0
   property real dragY: 0
   property int dropTarget: -1
+  property var dropBox: null     // unused/"+" box under the cursor, which grows around the window
 
   // Darker than the menu scrim: the previews are busy, and a see-through
   // backdrop makes the desktop behind them read as more windows.
@@ -55,6 +58,9 @@ Item {
   readonly property int labelHeight: Style.font.body + Style.space(12)
   readonly property int searchHeight: Style.font.body + Style.space(20)
   readonly property int boxW: Style.space(72)
+  // Hyprland puts gaps_in on each side of a tiled window, so two split halves
+  // sit 2 * gaps_in apart (5 on Omarchy).
+  readonly property int splitGap: 10
 
   readonly property var selectedWindow: {
     var ws = root.workspaces[root.selectedWs]
@@ -255,7 +261,8 @@ Item {
   }
 
   // Drop targets: workspace tiles, unused-workspace boxes and the "+" box.
-  // Returns the workspace id under a panel-coordinate point, or -1.
+  // Returns { id, box } for the target under a panel-coordinate point, where
+  // box is the box item or null for a tile; id is -1 over nothing.
   function targetAt(px, py) {
     function hit(item) {
       if (!item) return false
@@ -263,11 +270,11 @@ Item {
       return p.x >= 0 && p.y >= 0 && p.x < item.width && p.y < item.height
     }
     for (var i = 0; i < tiles.count; i++)
-      if (hit(tiles.itemAt(i))) return root.workspaces[i].id
+      if (hit(tiles.itemAt(i))) return { id: root.workspaces[i].id, box: null }
     for (var j = 0; j < freeBoxes.count; j++)
-      if (hit(freeBoxes.itemAt(j))) return root.freeIds[j]
-    if (hit(plusBox)) return root.newId
-    return -1
+      if (hit(freeBoxes.itemAt(j))) return { id: root.freeIds[j], box: freeBoxes.itemAt(j) }
+    if (hit(plusBox)) return { id: root.newId, box: plusBox }
+    return { id: -1, box: null }
   }
 
   function startDrag(client) {
@@ -278,7 +285,9 @@ Item {
   function updateDrag(px, py) {
     root.dragX = px
     root.dragY = py
-    root.dropTarget = root.targetAt(px, py)
+    var t = root.targetAt(px, py)
+    root.dropTarget = t.id
+    root.dropBox = t.box
   }
 
   function finishDrag() {
@@ -291,6 +300,42 @@ Item {
   function endDrag() {
     root.dragWin = null
     root.dropTarget = -1
+    root.dropBox = null
+  }
+
+  // Where the dragged window would land in workspace ws, in monitor-relative
+  // logical coordinates, mirroring Hyprland's dwindle layout with Omarchy's
+  // force_split = 2: the workspace's last-focused tiled window is split along
+  // its longer side and the new window takes the right or bottom half. An
+  // empty workspace gives it the whole usable area. Returns null when ws is
+  // not the drop target, or is the window's own workspace.
+  //   { target: address of the window being split (or ""),
+  //     targetRect: that window's new rect, newRect: the dragged window's }
+  function dropPreview(ws) {
+    if (!root.dragWin || root.dropTarget !== ws.id || root.dragWin.workspace.id === ws.id || !root.monitor) return null
+    var mon = root.monitor
+    var tiled = ws.windows.filter(function(c) { return !c.floating })
+    if (tiled.length === 0) {
+      var r = mon.reserved || [0, 0, 0, 0]
+      var g = root.splitGap
+      return { target: "", targetRect: null, newRect: {
+        x: r[0] + g, y: r[1] + g,
+        w: mon.width / mon.scale - r[0] - r[2] - 2 * g,
+        h: mon.height / mon.scale - r[1] - r[3] - 2 * g } }
+    }
+    tiled.sort(function(a, b) { return a.focusHistoryID - b.focusHistoryID })
+    var t = tiled[0]
+    var x = t.at[0] - mon.x, y = t.at[1] - mon.y, w = t.size[0], h = t.size[1]
+    if (w >= h) {
+      var hw = (w - root.splitGap) / 2
+      return { target: t.address,
+        targetRect: { x: x, y: y, w: hw, h: h },
+        newRect: { x: x + hw + root.splitGap, y: y, w: hw, h: h } }
+    }
+    var hh = (h - root.splitGap) / 2
+    return { target: t.address,
+      targetRect: { x: x, y: y, w: w, h: hh },
+      newRect: { x: x, y: y + hh + root.splitGap, w: w, h: hh } }
   }
 
   PanelWindow {
@@ -425,6 +470,7 @@ Item {
           readonly property bool selected: index === root.selectedWs
           readonly property bool current: root.monitor && modelData.id === root.monitor.activeWorkspace.id
           readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData.id
+          readonly property var preview: root.dropPreview(modelData)
           spacing: Style.space(6)
 
           Rectangle {
@@ -446,10 +492,17 @@ Item {
                 readonly property var toplevel: root.opened ? root.toplevelFor(modelData.address) : null
                 readonly property bool selected: tile.selected && index === root.selectedWin
                 readonly property bool dragged: root.dragWin !== null && root.dragWin.address === modelData.address
-                x: (modelData.at[0] - root.monitor.x) * panel.tileScale
-                y: (modelData.at[1] - root.monitor.y) * panel.tileScale
-                width: modelData.size[0] * panel.tileScale
-                height: modelData.size[1] * panel.tileScale
+                readonly property var rect: tile.preview && tile.preview.target === modelData.address
+                  ? tile.preview.targetRect
+                  : { x: modelData.at[0] - root.monitor.x, y: modelData.at[1] - root.monitor.y, w: modelData.size[0], h: modelData.size[1] }
+                x: rect.x * panel.tileScale
+                y: rect.y * panel.tileScale
+                width: rect.w * panel.tileScale
+                height: rect.h * panel.tileScale
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 z: selected ? 1 : 0
                 opacity: win.dragged ? 0.3 : root.matches(modelData) ? 1 : 0.2
 
@@ -490,6 +543,35 @@ Item {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
+              }
+            }
+
+            // The slot the dragged window will take, opened up by the
+            // preview above.
+            Rectangle {
+              id: slot
+              visible: opacity > 0
+              opacity: tile.preview ? 1 : 0
+              Behavior on opacity { NumberAnimation { duration: 160 } }
+              readonly property var r: tile.preview ? tile.preview.newRect : slot.lastRect
+              property var lastRect: ({ x: 0, y: 0, w: 0, h: 0 })
+              onRChanged: if (tile.preview) lastRect = tile.preview.newRect
+              x: r.x * panel.tileScale
+              y: r.y * panel.tileScale
+              width: r.w * panel.tileScale
+              height: r.h * panel.tileScale
+              z: 1
+              radius: Math.max(2, root.radius * panel.tileScale)
+              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
+              border.width: Style.space(2)
+              border.color: root.accent
+
+              ScreencopyView {
+                anchors.fill: parent
+                anchors.margins: Style.space(2)
+                opacity: 0.6
+                captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
+                live: slot.visible
               }
             }
 
@@ -590,10 +672,12 @@ Item {
     // Unused workspaces and "+": click to go there, drop a window to move it.
     Column {
       id: side
+      // Anchored at the top so a box growing under a drag pushes only the
+      // boxes below it, and never slides out from under the cursor.
       anchors.right: parent.right
       anchors.rightMargin: root.gap
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.verticalCenterOffset: root.searchHeight / 2
+      anchors.top: searchBox.bottom
+      anchors.topMargin: root.gap
       spacing: Style.space(8)
       opacity: grid.opacity
 
@@ -605,15 +689,20 @@ Item {
           id: box
           required property var modelData
           readonly property bool dropHere: root.dragWin !== null && root.dropTarget === modelData
-          width: root.boxW
-          height: panel.boxH
+          anchors.right: parent.right
+          width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
+          height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
+          Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+          Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
           radius: root.radius
           color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : root.background
           border.width: dropHere || boxMouse.containsMouse ? Style.space(2) : 1
           border.color: dropHere || boxMouse.containsMouse ? root.accent : root.dimBorder
 
+          // Hidden while the box holds a dragged window.
           Text {
             anchors.centerIn: parent
+            visible: !box.dropHere
             text: box.modelData
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.6)
             font.family: root.fontFamily
@@ -633,8 +722,11 @@ Item {
       Rectangle {
         id: plusBox
         readonly property bool dropHere: root.dragWin !== null && root.dropTarget === root.newId
-        width: root.boxW
-        height: panel.boxH
+        anchors.right: parent.right
+        width: dropHere ? dragProxy.w + Style.space(16) : root.boxW
+        height: dropHere ? dragProxy.h + Style.space(16) : panel.boxH
+        Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+        Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         radius: root.radius
         color: dropHere ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.12) : "transparent"
         border.width: dropHere || plusMouse.containsMouse ? Style.space(2) : 1
@@ -664,8 +756,12 @@ Item {
       visible: root.dragWin !== null
       readonly property real w: root.dragWin ? Math.min(root.dragWin.size[0] * panel.tileScale, panel.tileW * 0.6) : 0
       readonly property real h: root.dragWin ? w * root.dragWin.size[1] / root.dragWin.size[0] : 0
-      x: root.dragX - w / 2
-      y: root.dragY - h / 2
+      // Follows the cursor, except over a box, where it settles in the
+      // middle of the box growing around it.
+      x: root.dropBox ? side.x + root.dropBox.x + (root.dropBox.width - w) / 2 : root.dragX - w / 2
+      y: root.dropBox ? side.y + root.dropBox.y + (root.dropBox.height - h) / 2 : root.dragY - h / 2
+      Behavior on x { enabled: root.dropBox !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+      Behavior on y { enabled: root.dropBox !== null; NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
       width: w
       height: h
       z: 10
@@ -673,7 +769,8 @@ Item {
       color: Qt.darker(root.background, 1.3)
       border.width: Style.space(2)
       border.color: root.accent
-      opacity: 0.9
+      // Over a workspace the slot shows the window, so the proxy steps back.
+      opacity: root.dropTarget > 0 && !root.dropBox ? 0.45 : 0.9
 
       ScreencopyView {
         anchors.fill: parent
