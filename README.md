@@ -114,7 +114,10 @@ Restart the shell after an update: this plugin stays loaded, and the shell's hot
 
 ## Notes
 
-- Only regular workspaces are shown. Special workspaces (such as the scratchpad) are skipped.
+- Only regular workspaces are shown. Special workspaces (such as the scratchpad) are skipped, and a scratchpad that was open stays open after a drop.
+- A tab group shows as its active tab with a tab count, and search matches any of its tabs. Dragging a group moves the whole group, as Hyprland does.
+- Dropping a window into a workspace with a fullscreen or maximized window takes that window out of fullscreen, so the split is visible.
+- The overview follows windows opening, closing and moving while it is showing, and keeps the selection where it was.
 - Window positions come from `hyprctl` when the overview opens; previews then update live while it stays open.
 - With several monitors, the selection, the arrow keys and dragging all cross monitors following their arrangement. Keys work from whichever monitor's overview has keyboard focus (clicking one moves it there). After a move, every monitor goes back to the workspace it was showing.
 - Tested with three monitors, including a 1.0-scale ultrawide next to a 2.0-scale laptop screen.

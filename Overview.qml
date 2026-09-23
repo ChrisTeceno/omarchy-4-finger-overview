@@ -77,9 +77,14 @@ Item {
   readonly property int labelHeight: Style.font.body + Style.space(12)
   readonly property int searchHeight: Style.font.body + Style.space(20)
   readonly property int boxW: Style.space(72)
-  // Hyprland puts gaps_in on each side of a tiled window, so two split halves
-  // sit 2 * gaps_in apart (5 on Omarchy).
-  readonly property int splitGap: 10
+  // Hyprland's gaps and border width, read with each snapshot. Window
+  // positions from hyprctl exclude the border, so two split halves sit
+  // 2 * (gaps_in + border) apart, and a window sits gaps_out + border inside
+  // the monitor's usable area.
+  property int gapsIn: 5
+  property int gapsOut: 10
+  property int borderSize: 2
+  readonly property int splitGap: 2 * (gapsIn + borderSize)
 
   readonly property var selectedWindow: {
     if (root.selBox >= 0) return null
@@ -135,6 +140,7 @@ Item {
     root.helpOpen = false
     root.endDrag()
     root.opened = true
+    root.keepSelection = false
     clientsProc.running = true
   }
 
@@ -154,7 +160,7 @@ Item {
   // terminal), not just its title and class.
   Process {
     id: clientsProc
-    command: ["sh", "-c", "printf '{\"monitors\":%s,\"clients\":%s,\"workspaces\":%s,\"ps\":%s}' \"$(hyprctl monitors -j)\" \"$(hyprctl clients -j)\" \"$(hyprctl workspaces -j)\" \"$(ps -e -o pid=,ppid=,comm= | jq -Rs .)\""]
+    command: ["sh", "-c", "printf '{\"monitors\":%s,\"clients\":%s,\"workspaces\":%s,\"gapsIn\":%s,\"gapsOut\":%s,\"border\":%s,\"ps\":%s}' \"$(hyprctl monitors -j)\" \"$(hyprctl clients -j)\" \"$(hyprctl workspaces -j)\" \"$(hyprctl getoption general:gaps_in -j)\" \"$(hyprctl getoption general:gaps_out -j)\" \"$(hyprctl getoption general:border_size -j)\" \"$(ps -e -o pid=,ppid=,comm= | jq -Rs .)\""]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.build(text)
@@ -162,17 +168,51 @@ Item {
   }
 
   // Re-read the layout shortly after moving or closing a window, once
-  // Hyprland has applied it.
+  // Hyprland has applied it, keeping the selection where it was. A refresh
+  // that comes due mid-drag waits for the drop, so the layout does not shift
+  // under the cursor.
+  property bool keepSelection: false
+  property bool refreshPending: false
   Timer {
     id: refreshTimer
     interval: 200
-    onTriggered: clientsProc.running = true
+    onTriggered: root.refresh()
+  }
+
+  function refresh() {
+    if (!root.opened) return
+    if (root.dragWin) { root.refreshPending = true; return }
+    root.keepSelection = true
+    clientsProc.running = true
+  }
+
+  // Windows opening, closing or moving while the overview is showing (or
+  // from our own moves) re-read the layout.
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (!root.opened) return
+      var names = ["openwindow", "closewindow", "movewindowv2", "changefloatingmode", "fullscreen",
+                   "togglegroup", "moveintogroup", "moveoutofgroup", "createworkspacev2", "destroyworkspacev2", "moveworkspacev2"]
+      if (names.indexOf(event.name) >= 0) refreshTimer.restart()
+    }
   }
 
   function build(raw) {
     var data
     try { data = JSON.parse(raw) } catch (e) { console.warn("overview: bad hyprctl output", e); return }
     if (!data.monitors.length) return
+
+    // Gap options come back as CSS-style "top right bottom left"; the first
+    // value is enough for uniform gaps.
+    function firstGap(opt, fallback) {
+      var raw = !opt ? "" : opt.css !== undefined ? opt.css : opt.int
+      var v = parseInt(String(raw).split(" ")[0])
+      return isFinite(v) ? v : fallback
+    }
+    root.gapsIn = firstGap(data.gapsIn, root.gapsIn)
+    root.gapsOut = firstGap(data.gapsOut, root.gapsOut)
+    root.borderSize = firstGap(data.border, root.borderSize)
 
     // Program names in each window's process tree, two levels down from the
     // window's own process: terminal, then shell or multiplexer, then what
@@ -200,6 +240,12 @@ Item {
     var monName = {}
     data.monitors.forEach(function(m) { monName[m.id] = m.name })
 
+    // A tab group shows as its active tab (the one Hyprland reports as
+    // visible), carrying every tab for the badge and the search. Moving any
+    // tab moves the whole group, so the group acts as one window here.
+    var byAddr = {}
+    data.clients.forEach(function(c) { byAddr[c.address] = c })
+
     var byMon = {}
     data.monitors.forEach(function(m) { byMon[m.name] = {} })
     var used = {}
@@ -215,17 +261,23 @@ Item {
       used[c.workspace.id] = true
       highest = Math.max(highest, c.workspace.id)
       var mon = monName[c.monitor]
-      if (!mon || !c.mapped || c.hidden) continue
+      if (!mon || !c.mapped || c.hidden || c.visible === false) continue
       c.programs = programs(c.pid)
+      c.tabs = (c.grouped || []).map(function(a) { return byAddr[a] }).filter(function(t) { return t })
+      c.tabs.forEach(function(t) { if (t !== c) t.programs = programs(t.pid) })
       var group = byMon[mon]
       if (!group[c.workspace.id]) group[c.workspace.id] = { id: c.workspace.id, name: c.workspace.name, windows: [] }
       group[c.workspace.id].windows.push(c)
     }
 
+    // Draw order, bottom to top: tiled, floating, fullscreen. Hit tests walk
+    // it backwards, so the window on top wins, as on screen.
+    function layer(c) { return c.fullscreen > 0 ? 2 : c.floating ? 1 : 0 }
     var lists = {}
     for (var name in byMon) {
       var g = byMon[name]
       lists[name] = Object.keys(g).map(function(k) { return g[k] }).sort(function(a, b) { return a.id - b.id })
+      lists[name].forEach(function(w) { w.windows.sort(function(a, b) { return layer(a) - layer(b) }) })
     }
 
     var free = []
@@ -233,11 +285,32 @@ Item {
 
     var focused = data.monitors.find(function(m) { return m.focused }) || data.monitors[0]
 
+    // The selection before this rebuild, by identity rather than index.
+    var keep = root.keepSelection
+    root.keepSelection = false
+    var prevWin = root.selectedWindow, prevBox = root.selBox, prevMon = root.selMon
+    var prevWs = ((root.wsByMon[prevMon] || [])[root.selWs] || {}).id
+
     root.monitors = data.monitors
     root.focusedMon = focused.name
     root.wsByMon = lists
     root.freeIds = free
     root.newId = highest + 1
+
+    // After a refresh, stay on the same window, box or workspace if it is
+    // still there.
+    if (keep) {
+      if (prevWin) {
+        for (var pm in lists)
+          for (var pw = 0; pw < lists[pm].length; pw++) {
+            var pi = lists[pm][pw].windows.findIndex(function(c) { return c.address === prevWin.address })
+            if (pi >= 0) { root.select(pm, pw, pi); return }
+          }
+      }
+      if (prevBox >= 0 && prevBox <= free.length) { root.selectBox(prevMon, prevBox); return }
+      var wsi = (lists[prevMon] || []).findIndex(function(w) { return w.id === prevWs })
+      if (wsi >= 0) { root.selectWorkspace(prevMon, wsi); return }
+    }
 
     // Start on the focused window (focusHistoryID 0), else the active
     // workspace of the focused monitor.
@@ -293,15 +366,17 @@ Item {
     refreshTimer.restart()
   }
 
-  // Steps that put every monitor back on the workspace it was showing, the
-  // focused monitor last so focus ends where it started.
+  // Steps that put every monitor back on the workspace it was showing, and
+  // reopen a special workspace (the scratchpad) that was open on it, since
+  // focusing a regular workspace closes it. The focused monitor goes last so
+  // focus ends where it started.
   function restoreSteps() {
     var steps = []
-    var focused = root.monitorByName(root.focusedMon)
-    root.monitors.forEach(function(m) {
-      if (m.name !== root.focusedMon) steps.push("hl.dsp.focus({ workspace = \"" + m.activeWorkspace.id + "\" })")
+    root.monitors.slice().sort(function(a, b) { return (a.name === root.focusedMon) - (b.name === root.focusedMon) }).forEach(function(m) {
+      steps.push("hl.dsp.focus({ workspace = \"" + m.activeWorkspace.id + "\" })")
+      var special = (m.specialWorkspace || {}).name || ""
+      if (special) steps.push("hl.dsp.workspace.toggle_special(\"" + special.replace(/^special:/, "") + "\")")
     })
-    if (focused) steps.push("hl.dsp.focus({ workspace = \"" + focused.activeWorkspace.id + "\" })")
     return steps
   }
 
@@ -313,6 +388,14 @@ Item {
     if (!root.workspaceExists(wsId)) steps.push("hl.dsp.focus({ monitor = \"" + mon + "\" })")
     steps.push("hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + wsId + "\", follow = false })")
     root.runBatch(steps.concat(root.restoreSteps()))
+  }
+
+  function workspaceWindows(id) {
+    for (var name in root.wsByMon) {
+      var ws = root.wsByMon[name].find(function(w) { return w.id === id })
+      if (ws) return ws.windows
+    }
+    return []
   }
 
   function workspaceExists(id) {
@@ -335,6 +418,12 @@ Item {
     var steps = []
     if (w.workspace.id === wsId)
       steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"special:overview-drag\", follow = false })")
+    // A fullscreen or maximized window would cover the new split, so take
+    // it out of fullscreen first.
+    root.workspaceWindows(wsId).forEach(function(c) {
+      if (c.fullscreen > 0 && c.address !== w.address)
+        steps.push("hl.dsp.window.fullscreen_state({ window = \"address:" + c.address + "\", internal = 0, client = 0 })")
+    })
     steps.push("hl.dsp.focus({ window = \"address:" + target.address + "\" })")
     if (w.floating) {
       steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
@@ -388,8 +477,11 @@ Item {
   function matches(c) {
     if (!root.filterText) return true
     var needle = root.filterText.toLowerCase()
-    return [c.title, c.class, c.initialClass, c.programs].some(function(f) {
-      return String(f || "").toLowerCase().indexOf(needle) >= 0
+    var all = [c].concat(c.tabs || [])
+    return all.some(function(t) {
+      return [t.title, t.class, t.initialClass, t.programs].some(function(f) {
+        return String(f || "").toLowerCase().indexOf(needle) >= 0
+      })
     })
   }
 
@@ -613,6 +705,11 @@ Item {
     var tiled = list[i].windows.filter(function(c) { return !c.floating && c.address !== dragged.address })
     if (tiled.length === 0) return { target: null, side: "" }
 
+    // A fullscreen or maximized window covers the rest, so it is the one
+    // being split; the drop takes it out of fullscreen (placeWindow).
+    var full = tiled.find(function(c) { return c.fullscreen > 0 })
+    if (full) tiled = [full]
+
     var target = null, best = Infinity
     for (var k = 0; k < tiled.length; k++) {
       var c = tiled[k]
@@ -699,6 +796,7 @@ Item {
   }
 
   function endDrag() {
+    if (root.refreshPending) { root.refreshPending = false; refreshTimer.restart() }
     root.keyGrab = false
     root.dragWin = null
     root.dragMon = ""
@@ -720,15 +818,16 @@ Item {
     if (!m) return null
     var g = root.splitGap
     var t = root.dropAt.target
-    if (!t) {
-      var r = m.reserved || [0, 0, 0, 0]
-      var s = root.logicalSize(m)
-      return { target: "", targetRect: null, newRect: {
-        x: r[0] + g, y: r[1] + g,
-        w: s.w - r[0] - r[2] - 2 * g,
-        h: s.h - r[1] - r[3] - 2 * g } }
-    }
+    // The usable area of the monitor, which an empty workspace's first
+    // window fills, and which a fullscreen window returns to when the drop
+    // takes it out of fullscreen.
+    var r = m.reserved || [0, 0, 0, 0]
+    var s = root.logicalSize(m)
+    var o = root.gapsOut + root.borderSize
+    var area = { x: r[0] + o, y: r[1] + o, w: s.w - r[0] - r[2] - 2 * o, h: s.h - r[1] - r[3] - 2 * o }
+    if (!t) return { target: "", targetRect: null, newRect: area }
     var x = t.at[0] - m.x, y = t.at[1] - m.y, w = t.size[0], h = t.size[1]
+    if (t.fullscreen > 0) { x = area.x; y = area.y; w = area.w; h = area.h }
     var hw = (w - g) / 2, hh = (h - g) / 2
     var first = { l: { x: x, y: y, w: hw, h: h }, u: { x: x, y: y, w: w, h: hh } }
     var second = { l: { x: x + hw + g, y: y, w: hw, h: h }, u: { x: x, y: y + hh + g, w: w, h: hh } }
@@ -985,6 +1084,29 @@ Item {
                     color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15)
                     border.width: Style.space(3)
                     border.color: root.accent
+                  }
+
+                  // Tab count for a window group, which shows its active tab.
+                  Rectangle {
+                    visible: (win.modelData.tabs || []).length > 1
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.margins: Style.space(4)
+                    width: tabText.implicitWidth + Style.space(10)
+                    height: tabText.implicitHeight + Style.space(4)
+                    radius: height / 2
+                    color: root.background
+                    border.width: 1
+                    border.color: root.accent
+
+                    Text {
+                      id: tabText
+                      anchors.centerIn: parent
+                      text: (win.modelData.tabs || []).length + " tabs"
+                      color: root.accent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   Text {
