@@ -28,8 +28,8 @@ Then add the gestures to `~/.config/hypr/input.lua`:
 hl.gesture({ fingers = 3, direction = "horizontal", action = "workspace" })
 hl.gesture({ fingers = 4, direction = "horizontal", action = "workspace" })
 
--- 4-finger swipe up opens the overview, down closes it.
-hl.gesture({ fingers = 4, direction = "up", action = function() hl.exec_cmd("omarchy-shell shell summon christeceno.4-finger-overview '{}'") end })
+-- 4-finger swipe up opens or closes the overview, down closes it.
+hl.gesture({ fingers = 4, direction = "up", action = function() hl.exec_cmd("omarchy-shell shell toggle christeceno.4-finger-overview") end })
 hl.gesture({ fingers = 4, direction = "down", action = function() hl.exec_cmd("omarchy-shell shell hide christeceno.4-finger-overview") end })
 ```
 
@@ -43,13 +43,41 @@ o.bind("SUPER + TAB", "Overview", "omarchy-shell shell toggle christeceno.4-fing
 
 (SUPER+TAB is taken by default in Omarchy; call `hl.unbind("SUPER + TAB")` first if you want it.)
 
+Hyprland handles its own key bindings before the overview sees the key, so SUPER+arrow and SUPER+K need a small forwarder in `~/.config/hypr/bindings.lua`. These keep Omarchy's usual actions (move focus, keybindings menu) and only drive the overview while it is showing:
+
+```lua
+local function overview_open()
+  return #hl.get_layers({ namespace = "christeceno-4-finger-overview" }) > 0
+end
+
+local function overview_send(payload)
+  hl.exec_cmd("omarchy-shell shell summon christeceno.4-finger-overview '" .. payload .. "'")
+end
+
+-- SUPER+arrows: jump between workspaces in the overview, move focus otherwise.
+for key, dir in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
+  hl.unbind("SUPER + " .. key)
+  o.bind("SUPER + " .. key, "Focus " .. key:lower(), function()
+    if overview_open() then overview_send('{"jump":"' .. dir .. '"}')
+    else hl.dispatch(hl.dsp.focus({ direction = dir })) end
+  end)
+end
+
+-- SUPER+K: the overview's shortcut sheet in the overview, Omarchy's keybindings menu otherwise.
+hl.unbind("SUPER + K")
+o.bind("SUPER + K", "Keybindings", function()
+  if overview_open() then overview_send('{"help":true}')
+  else hl.exec_cmd("omarchy-menu-keybindings") end
+end)
+```
+
 ## Usage
 
 One window is selected at a time. It starts on the focused window and follows the mouse or the arrow keys; its title shows under its workspace. Typing filters windows by title, app name, or the programs running inside them (so `herdr` or `claude` finds the terminal they run in): matches stay bright, the rest dim, and the arrow keys skip over them.
 
 | Input | Action |
 | --- | --- |
-| 4-finger swipe up | Open |
+| 4-finger swipe up | Open or close |
 | 4-finger swipe down, click the background | Close |
 | Esc | Cancel a drag, then clear the search, then close |
 | Type | Search windows (Backspace edits) |
@@ -60,6 +88,8 @@ One window is selected at a time. It starts on the focused window and follows th
 | Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or to an unused box or "+" |
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces |
+| SUPER + arrow keys | Jump to the neighbouring workspace (needs the forwarder above) |
+| SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 
 ## Update and remove

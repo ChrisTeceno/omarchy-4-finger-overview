@@ -37,6 +37,7 @@ Item {
   property int selectedWs: 0     // index into workspaces
   property int selectedWin: -1   // index into workspaces[selectedWs].windows, -1 for none
   property string filterText: ""
+  property bool helpOpen: false
 
   // Drag state. dragX/dragY are in panel coordinates; dropTarget is the
   // workspace id under the cursor, or -1.
@@ -73,8 +74,25 @@ Item {
     return ws && root.selectedWin >= 0 ? ws.windows[root.selectedWin] : null
   }
 
+  // While open, a payload of {"jump": "l"|"r"|"u"|"d"} moves the selection to
+  // the neighbouring workspace and {"help": true} toggles the shortcut sheet,
+  // instead of reopening. Hyprland keeps SUPER+arrow and SUPER+K for itself,
+  // so the README's bindings send them here while the overview is showing.
   function open(payloadJson) {
+    var payload = {}
+    try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
+    if (root.opened && payload.help) {
+      root.helpOpen = !root.helpOpen
+      return
+    }
+    if (root.opened && payload.jump) {
+      var dirs = { l: [-1, 0], r: [1, 0], u: [0, -1], d: [0, 1] }
+      var d = dirs[payload.jump]
+      if (d) root.moveWorkspace(d[0], d[1])
+      return
+    }
     root.filterText = ""
+    root.helpOpen = false
     root.endDrag()
     root.opened = true
     clientsProc.running = true
@@ -285,6 +303,31 @@ Item {
     if (best) root.select(best.ws, best.win)
   }
 
+  // Move the selection to the nearest workspace tile in a direction, landing
+  // on its last-focused window that passes the search.
+  function moveWorkspace(dx, dy) {
+    var n = root.workspaces.length
+    if (n === 0) return
+    function center(w) {
+      return { x: (w % panel.cols) * (panel.tileW + root.gap), y: Math.floor(w / panel.cols) * (panel.tileH + root.labelHeight + root.gap) }
+    }
+    var from = center(root.selectedWs)
+    var best = -1, bestScore = Infinity
+    for (var w = 0; w < n; w++) {
+      var c = center(w)
+      var along = (c.x - from.x) * dx + (c.y - from.y) * dy
+      if (along <= 1) continue
+      var score = along + (Math.abs((c.x - from.x) * dy) + Math.abs((c.y - from.y) * dx)) * 2
+      if (score < bestScore) { bestScore = score; best = w }
+    }
+    if (best < 0) return
+    var wins = root.workspaces[best].windows
+    var pick = -1
+    for (var i = 0; i < wins.length; i++)
+      if (root.matches(wins[i]) && (pick < 0 || wins[i].focusHistoryID < wins[pick].focusHistoryID)) pick = i
+    root.select(best, pick)
+  }
+
   // Tab order: every window in reading order, wrapping.
   function moveSequential(delta) {
     var all = root.windowCenters()
@@ -470,11 +513,21 @@ Item {
       // Printable keys go to the search, so navigation is arrows and Tab only.
       Keys.onPressed: function(event) {
         var k = event.key
-        if (k === Qt.Key_Escape) {
+        if (root.helpOpen && k !== Qt.Key_K) {
+          root.helpOpen = false
+          event.accepted = true
+          return
+        }
+        if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_K) root.helpOpen = !root.helpOpen
+        else if (k === Qt.Key_Escape) {
           if (root.dragWin) root.endDrag()
           else if (root.filterText) root.setFilter("")
           else root.close()
         }
+        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Left) root.moveWorkspace(-1, 0)
+        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Right) root.moveWorkspace(1, 0)
+        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Up) root.moveWorkspace(0, -1)
+        else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Down) root.moveWorkspace(0, 1)
         else if (k === Qt.Key_Left) root.moveSpatial(-1, 0)
         else if (k === Qt.Key_Right) root.moveSpatial(1, 0)
         else if (k === Qt.Key_Up) root.moveSpatial(0, -1)
@@ -843,6 +896,83 @@ Item {
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
           onClicked: root.goToWorkspace(root.newId)
+        }
+      }
+    }
+
+    // Shortcut sheet, toggled with SUPER+K; any other key or a click closes it.
+    Item {
+      anchors.fill: parent
+      visible: root.helpOpen
+      z: 20
+
+      Rectangle {
+        anchors.fill: parent
+        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.6)
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: root.helpOpen = false
+      }
+
+      Rectangle {
+        anchors.centerIn: parent
+        width: helpGrid.width + Style.space(48)
+        height: helpTitle.height + helpGrid.height + Style.space(64)
+        radius: root.radius
+        color: root.background
+        border.width: 1
+        border.color: root.dimBorder
+
+        Text {
+          id: helpTitle
+          anchors.top: parent.top
+          anchors.topMargin: Style.space(24)
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: "Overview shortcuts"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+        }
+
+        Grid {
+          id: helpGrid
+          anchors.top: helpTitle.bottom
+          anchors.topMargin: Style.space(16)
+          anchors.horizontalCenter: parent.horizontalCenter
+          columns: 2
+          columnSpacing: Style.space(32)
+          rowSpacing: Style.space(8)
+
+          Repeater {
+            model: [
+              "Arrow keys", "Select the nearest window in that direction",
+              "SUPER + arrow keys", "Jump to the neighbouring workspace",
+              "Tab / Shift + Tab", "Step through every window",
+              "Enter", "Focus the selected window",
+              "Type", "Search by title, app or program (Backspace edits)",
+              "Esc", "Cancel drag, clear search, then close",
+              "Click window", "Focus it",
+              "Click empty space", "Switch to that workspace",
+              "Middle-click window", "Close it",
+              "Drag window", "Place it beside the window under the cursor",
+              "Drag to a box or +", "Move it to that workspace",
+              "4-finger swipe up / SUPER + TAB", "Open or close",
+              "SUPER + K", "Show or hide this sheet"
+            ]
+
+            delegate: Text {
+              required property var modelData
+              required property int index
+              text: modelData
+              color: index % 2 === 0 ? root.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: index % 2 === 0
+            }
+          }
         }
       }
     }
