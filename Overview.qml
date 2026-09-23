@@ -233,6 +233,17 @@ Item {
                   live: root.opened
                 }
 
+                // Hover highlight: accent tint and border drawn over the
+                // preview, so it shows whatever the window contains.
+                Rectangle {
+                  anchors.fill: parent
+                  radius: Math.max(2, root.radius * panel.tileScale)
+                  visible: winMouse.containsMouse
+                  color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                  border.width: Style.space(2)
+                  border.color: root.accent
+                }
+
                 Text {
                   visible: !win.toplevel
                   anchors.centerIn: parent
@@ -246,8 +257,10 @@ Item {
                 }
 
                 MouseArea {
+                  id: winMouse
                   anchors.fill: parent
                   hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
                   onEntered: root.selectedIndex = tile.index
                   onClicked: root.focusWindow(win.modelData.address)
                 }
