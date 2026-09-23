@@ -18,9 +18,11 @@ import qs.Commons
 // windows by title and class.
 //
 // Dragging a window onto another workspace, an unused box, or "+" moves it
-// there without leaving the overview, which then re-reads the layout. While
-// dragging, a box grows around the window, and a workspace previews the split
-// the window will land in, with its windows sliding over to make room.
+// there without leaving the overview, which then re-reads the layout. Inside
+// a workspace, including the window's own, the drop splits the tiled window
+// under the cursor, on the side of it nearest the cursor. While dragging, a
+// box grows around the window, and a workspace previews the split, with the
+// window being split sliding over to make room.
 //
 // Summoned by a 4-finger swipe (see README) through
 // `omarchy-shell shell summon christeceno.4-finger-overview '{}'`.
@@ -43,6 +45,10 @@ Item {
   property real dragY: 0
   property int dropTarget: -1
   property var dropBox: null     // unused/"+" box under the cursor, which grows around the window
+  // Over a workspace tile: the tiled window the drop will split, and on which
+  // side ("l", "r", "u", "d") the dragged window goes. target is null when
+  // the workspace has no tiled window to split.
+  property var dropAt: null      // { target: client | null, side: string }
 
   // Darker than the menu scrim: the previews are busy, and a see-through
   // backdrop makes the desktop behind them read as more windows.
@@ -288,54 +294,117 @@ Item {
     var t = root.targetAt(px, py)
     root.dropTarget = t.id
     root.dropBox = t.box
+    root.dropAt = t.id > 0 && !t.box ? root.splitAt(t.id, px, py) : null
+  }
+
+  // Which tiled window of workspace wsId a drop at a panel point splits, and
+  // on which side: the window under the point, else the nearest one by
+  // center, never the dragged window itself. The side is the edge of that
+  // window nearest the point, measured relative to its size.
+  function splitAt(wsId, px, py) {
+    var i = root.workspaces.findIndex(function(w) { return w.id === wsId })
+    var item = tiles.itemAt(i)
+    if (i < 0 || !item) return null
+    var local = item.mapFromItem(panel.contentItem, px, py)
+    var lx = local.x / panel.tileScale + root.monitor.x
+    var ly = local.y / panel.tileScale + root.monitor.y
+    var dragged = root.dragWin
+    var tiled = root.workspaces[i].windows.filter(function(c) { return !c.floating && c.address !== dragged.address })
+    if (tiled.length === 0) return { target: null, side: "" }
+
+    var target = null, best = Infinity
+    for (var k = 0; k < tiled.length; k++) {
+      var c = tiled[k]
+      var inside = lx >= c.at[0] && ly >= c.at[1] && lx < c.at[0] + c.size[0] && ly < c.at[1] + c.size[1]
+      var d = inside ? -1 : Math.hypot(lx - (c.at[0] + c.size[0] / 2), ly - (c.at[1] + c.size[1] / 2))
+      if (d < best) { best = d; target = c }
+    }
+    var dx = (lx - (target.at[0] + target.size[0] / 2)) / target.size[0]
+    var dy = (ly - (target.at[1] + target.size[1] / 2)) / target.size[1]
+    var side = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? "l" : "r") : (dy < 0 ? "u" : "d")
+    return { target: target, side: side }
   }
 
   function finishDrag() {
     var w = root.dragWin
     var target = root.dropTarget
+    var at = root.dropAt
+    var box = root.dropBox
     root.endDrag()
-    if (w && target > 0 && target !== w.workspace.id) root.moveWindow(w.address, target)
+    if (!w || target <= 0) return
+    if (!box && at && at.target) root.placeWindow(w, target, at.target, at.side)
+    else if (target !== w.workspace.id) root.moveWindow(w.address, target)
+  }
+
+  // Put window w into workspace wsId as a split of window `target`, on `side`.
+  // Hyprland's dwindle layout (with use_active_for_splits, the default)
+  // splits the focused window of the workspace a window is added to, and
+  // "preselect" picks the side for the next one. So: focus the target, which
+  // shows its workspace behind the overview, preselect, add the window, then
+  // return to the workspace that was showing. A window already in wsId is
+  // first parked on a special workspace so it can be added again. A floating
+  // window is tiled as it lands, which is what adds it to the split. Run as
+  // one hyprctl batch so nothing else lands in between.
+  function placeWindow(w, wsId, target, side) {
+    var addr = "address:" + w.address
+    var steps = []
+    if (w.workspace.id === wsId)
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"special:overview-drag\", follow = false })")
+    steps.push("hl.dsp.focus({ window = \"address:" + target.address + "\" })")
+    if (w.floating) {
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
+      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
+      steps.push("hl.dsp.window.float({ window = \"" + addr + "\", action = \"disable\" })")
+    } else {
+      steps.push("hl.dsp.layout(\"preselect " + side + "\")")
+      steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
+    }
+    steps.push("hl.dsp.focus({ workspace = \"" + root.monitor.activeWorkspace.id + "\" })")
+    batchProc.command = ["hyprctl", "--batch", steps.map(function(x) { return "dispatch " + x }).join(" ; ")]
+    batchProc.running = true
+  }
+
+  Process {
+    id: batchProc
+    onExited: refreshTimer.restart()
   }
 
   function endDrag() {
     root.dragWin = null
     root.dropTarget = -1
     root.dropBox = null
+    root.dropAt = null
   }
 
   // Where the dragged window would land in workspace ws, in monitor-relative
-  // logical coordinates, mirroring Hyprland's dwindle layout with Omarchy's
-  // force_split = 2: the workspace's last-focused tiled window is split along
-  // its longer side and the new window takes the right or bottom half. An
-  // empty workspace gives it the whole usable area. Returns null when ws is
-  // not the drop target, or is the window's own workspace.
+  // logical coordinates: the split window's half away from `side`, and the
+  // dragged window's half on it, 2 * gaps_in apart. An empty workspace (or
+  // one with only floating windows) gives it the whole usable area. Returns
+  // null when ws is not the drop target.
   //   { target: address of the window being split (or ""),
   //     targetRect: that window's new rect, newRect: the dragged window's }
   function dropPreview(ws) {
-    if (!root.dragWin || root.dropTarget !== ws.id || root.dragWin.workspace.id === ws.id || !root.monitor) return null
+    if (!root.dragWin || root.dropTarget !== ws.id || !root.dropAt || !root.monitor) return null
     var mon = root.monitor
-    var tiled = ws.windows.filter(function(c) { return !c.floating })
-    if (tiled.length === 0) {
+    var g = root.splitGap
+    var t = root.dropAt.target
+    if (!t) {
       var r = mon.reserved || [0, 0, 0, 0]
-      var g = root.splitGap
       return { target: "", targetRect: null, newRect: {
         x: r[0] + g, y: r[1] + g,
         w: mon.width / mon.scale - r[0] - r[2] - 2 * g,
         h: mon.height / mon.scale - r[1] - r[3] - 2 * g } }
     }
-    tiled.sort(function(a, b) { return a.focusHistoryID - b.focusHistoryID })
-    var t = tiled[0]
     var x = t.at[0] - mon.x, y = t.at[1] - mon.y, w = t.size[0], h = t.size[1]
-    if (w >= h) {
-      var hw = (w - root.splitGap) / 2
-      return { target: t.address,
-        targetRect: { x: x, y: y, w: hw, h: h },
-        newRect: { x: x + hw + root.splitGap, y: y, w: hw, h: h } }
-    }
-    var hh = (h - root.splitGap) / 2
+    var hw = (w - g) / 2, hh = (h - g) / 2
+    var first = { l: { x: x, y: y, w: hw, h: h }, u: { x: x, y: y, w: w, h: hh } }
+    var second = { l: { x: x + hw + g, y: y, w: hw, h: h }, u: { x: x, y: y + hh + g, w: w, h: hh } }
+    var side = root.dropAt.side
+    var axis = side === "l" || side === "r" ? "l" : "u"
+    var newFirst = side === "l" || side === "u"
     return { target: t.address,
-      targetRect: { x: x, y: y, w: w, h: hh },
-      newRect: { x: x, y: y + hh + root.splitGap, w: w, h: hh } }
+      targetRect: newFirst ? second[axis] : first[axis],
+      newRect: newFirst ? first[axis] : second[axis] }
   }
 
   PanelWindow {

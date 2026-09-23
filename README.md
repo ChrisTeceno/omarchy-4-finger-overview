@@ -4,7 +4,9 @@ A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger
 
 It shows only the workspaces on the **focused monitor** that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Workspaces on other monitors are left out. A column on the right lists the unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new workspace.
 
-Drag a window onto another workspace, an unused box, or "+" to move it there. Over a box, the box grows around the window. Over a workspace, its windows slide over to open the slot the window will land in, following Hyprland's dwindle layout with `force_split = 2` (Omarchy's default): the workspace's last-focused tiled window splits along its longer side and the new window takes the right or bottom half. The overview stays open and redraws with the new layout.
+Drag a window onto an unused box or "+" to move it there; the box grows around the window as you hover. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
+
+Placement uses Hyprland's dwindle layout with `use_active_for_splits` on (the default): on drop the plugin briefly focuses the target window behind the overview, preselects the side, moves the window in, and switches back to the workspace you were on.
 
 It runs as an overlay plugin inside the Omarchy shell (Quickshell), so it picks up your theme's menu colors and font and needs no extra process.
 
@@ -55,7 +57,7 @@ One window is selected at a time. It starts on the focused window and follows th
 | Click a window, or Enter | Focus the selected window |
 | Click the empty part of a workspace | Switch to that workspace |
 | Click an unused box or "+" | Switch to that workspace, or a new one |
-| Drag a window | Move it to the workspace, unused box or "+" it is dropped on |
+| Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or to an unused box or "+" |
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces |
 | Tab, Shift+Tab | Step through every window in order |
