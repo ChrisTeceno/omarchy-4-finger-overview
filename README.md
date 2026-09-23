@@ -43,7 +43,7 @@ o.bind("SUPER + TAB", "Overview", "omarchy-shell shell toggle christeceno.4-fing
 
 (SUPER+TAB is taken by default in Omarchy; call `hl.unbind("SUPER + TAB")` first if you want it.)
 
-Hyprland handles its own key bindings before the overview sees the key, so SUPER+arrow and SUPER+K need a small forwarder in `~/.config/hypr/bindings.lua`. These keep Omarchy's usual actions (move focus, keybindings menu) and only drive the overview while it is showing:
+Hyprland handles its own key bindings before the overview sees the key, so SUPER+arrow, SUPER+SHIFT+arrow and SUPER+K need a small forwarder in `~/.config/hypr/bindings.lua`. These keep Omarchy's usual actions (move focus, swap windows, keybindings menu) and only drive the overview while it is showing:
 
 ```lua
 local function overview_open()
@@ -60,6 +60,15 @@ for key, dir in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
   o.bind("SUPER + " .. key, "Focus " .. key:lower(), function()
     if overview_open() then overview_send('{"jump":"' .. dir .. '"}')
     else hl.dispatch(hl.dsp.focus({ direction = dir })) end
+  end)
+end
+
+-- SUPER+SHIFT+arrows: grab and move a window in the overview, swap windows otherwise.
+for key, dir in pairs({ LEFT = "l", RIGHT = "r", UP = "u", DOWN = "d" }) do
+  hl.unbind("SUPER + SHIFT + " .. key)
+  o.bind("SUPER + SHIFT + " .. key, "Swap window " .. key:lower(), function()
+    if overview_open() then overview_send('{"grab":"' .. dir .. '"}')
+    else hl.dispatch(hl.dsp.window.swap({ direction = dir })) end
   end)
 end
 
@@ -89,6 +98,7 @@ One window is selected at a time. It starts on the focused window and follows th
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
 | SUPER + arrow keys | Jump to the neighbouring workspace, unused box or "+" (needs the forwarder above) |
+| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop slots (each side of every window, empty workspaces, the unused boxes and "+"); after that, plain arrows keep moving it, Enter drops it and Esc cancels (needs the forwarder above) |
 | SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 

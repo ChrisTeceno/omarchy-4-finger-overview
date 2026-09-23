@@ -51,6 +51,7 @@ Item {
   // side ("l", "r", "u", "d") the dragged window goes. target is null when
   // the workspace has no tiled window to split.
   property var dropAt: null      // { target: client | null, side: string }
+  property bool keyGrab: false   // the drag was started from the keyboard (SUPER+SHIFT+arrow)
 
   // Darker than the menu scrim: the previews are busy, and a see-through
   // backdrop makes the desktop behind them read as more windows.
@@ -77,14 +78,21 @@ Item {
   }
 
   // While open, a payload of {"jump": "l"|"r"|"u"|"d"} moves the selection to
-  // the neighbouring workspace and {"help": true} toggles the shortcut sheet,
-  // instead of reopening. Hyprland keeps SUPER+arrow and SUPER+K for itself,
-  // so the README's bindings send them here while the overview is showing.
+  // the neighbouring workspace, {"grab": dir} grabs the selected window or
+  // moves the grabbed one, and {"help": true} toggles the shortcut sheet,
+  // instead of reopening. Hyprland keeps SUPER+arrow, SUPER+SHIFT+arrow and
+  // SUPER+K for itself, so the README's bindings send them here while the
+  // overview is showing.
   function open(payloadJson) {
     var payload = {}
     try { payload = JSON.parse(payloadJson || "{}") || {} } catch (e) {}
     if (root.opened && payload.help) {
       root.helpOpen = !root.helpOpen
+      return
+    }
+    if (root.opened && payload.grab) {
+      var gd = { l: [-1, 0], r: [1, 0], u: [0, -1], d: [0, 1] }[payload.grab]
+      if (gd) root.grabStep(gd[0], gd[1])
       return
     }
     if (root.opened && payload.jump) {
@@ -499,7 +507,66 @@ Item {
     onExited: refreshTimer.restart()
   }
 
+  // Keyboard drag. The first SUPER+SHIFT+arrow picks up the selected window;
+  // each arrow after that moves it to the nearest drop slot in that
+  // direction: a side of another window, an empty workspace, an unused box or
+  // "+". It reuses the mouse drag by pointing the drag at the slot, so the
+  // preview and the drop are the same. Enter drops, Esc cancels.
+  function grabStep(dx, dy) {
+    if (!root.dragWin) {
+      // With a workspace selected but no window (the pointer resting on a
+      // gap), take its last-focused window.
+      if (!root.selectedWindow && root.selectedBox < 0 && root.workspaces[root.selectedWs])
+        root.selectWorkspace(root.selectedWs)
+      var w = root.selectedWindow
+      if (!w) return
+      var start = root.windowPoint(root.selectedWs, w, 0.5, 0.5)
+      root.startDrag(w)
+      root.keyGrab = true
+      if (start) root.updateDrag(start.x, start.y)
+    }
+    var best = root.nearestInDirection({ x: root.dragX, y: root.dragY }, root.grabSlots(), dx, dy)
+    if (best) root.updateDrag(best.x, best.y)
+  }
+
+  // Panel-coordinate point at fractions (fx, fy) across window c's rect in
+  // workspace tile w.
+  function windowPoint(w, c, fx, fy) {
+    var item = tiles.itemAt(w)
+    if (!item) return null
+    return item.mapToItem(panel.contentItem,
+      (c.at[0] - root.monitor.x + c.size[0] * fx) * panel.tileScale,
+      (c.at[1] - root.monitor.y + c.size[1] * fy) * panel.tileScale)
+  }
+
+  // Every drop slot as a panel point that splitAt/targetAt resolve to it:
+  // just inside each edge of every other tiled window, the center of a
+  // workspace with nothing to split, and each side-column box.
+  function grabSlots() {
+    var out = []
+    for (var w = 0; w < root.workspaces.length; w++) {
+      var tiled = root.workspaces[w].windows.filter(function(c) { return !c.floating && c.address !== root.dragWin.address })
+      if (tiled.length === 0) {
+        var item = tiles.itemAt(w)
+        if (item) out.push(item.mapToItem(panel.contentItem, panel.tileW / 2, panel.tileH / 2))
+        continue
+      }
+      tiled.forEach(function(c) {
+        ;[[0.15, 0.5], [0.85, 0.5], [0.5, 0.15], [0.5, 0.85]].forEach(function(f) {
+          var p = root.windowPoint(w, c, f[0], f[1])
+          if (p) out.push(p)
+        })
+      })
+    }
+    for (var i = 0; i <= root.freeIds.length; i++) {
+      var box = root.boxItem(i)
+      if (box) out.push(box.mapToItem(panel.contentItem, box.width / 2, box.height / 2))
+    }
+    return out.map(function(p) { return { x: p.x, y: p.y } })
+  }
+
   function endDrag() {
+    root.keyGrab = false
     root.dragWin = null
     root.dropTarget = -1
     root.dropBox = null
@@ -578,6 +645,9 @@ Item {
           return
         }
         if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_K) root.helpOpen = !root.helpOpen
+        else if (root.keyGrab && (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down))
+          root.grabStep(k === Qt.Key_Left ? -1 : k === Qt.Key_Right ? 1 : 0, k === Qt.Key_Up ? -1 : k === Qt.Key_Down ? 1 : 0)
+        else if (root.keyGrab && (k === Qt.Key_Return || k === Qt.Key_Enter)) root.finishDrag()
         else if (k === Qt.Key_Escape) {
           if (root.dragWin) root.endDrag()
           else if (root.filterText) root.setFilter("")
@@ -644,6 +714,17 @@ Item {
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
       }
+    }
+
+    Text {
+      anchors.top: searchBox.bottom
+      anchors.topMargin: Style.space(6)
+      anchors.horizontalCenter: searchBox.horizontalCenter
+      visible: root.keyGrab
+      text: "Arrows move the window, Enter drops it, Esc cancels"
+      color: root.accent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
     }
 
     Text {
@@ -1014,6 +1095,7 @@ Item {
             model: [
               "Arrow keys", "Select the nearest window in that direction",
               "SUPER + arrow keys", "Jump to the neighbouring workspace or box",
+              "SUPER + SHIFT + arrow keys", "Grab the selected window; arrows move it, Enter drops",
               "Tab / Shift + Tab", "Step through every window",
               "Enter", "Focus the selected window, or go to the selected box",
               "Type", "Search by title, app or program (Backspace edits)",
