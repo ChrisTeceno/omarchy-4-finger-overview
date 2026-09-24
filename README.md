@@ -124,7 +124,7 @@ Restart the shell after an update: this plugin stays loaded, and the shell's hot
 - A tab group shows as its active tab with a tab count, and search matches any of its tabs. Dragging a group moves the whole group, as Hyprland does.
 - Dropping a window into a workspace with a fullscreen or maximized window takes that window out of fullscreen, so the split is visible.
 - The overview follows windows opening, closing and moving while it is showing, and keeps the selection where it was.
-- Window positions come from `hyprctl` when the overview opens; previews then update live while it stays open.
+- Previews are snapshots refreshed while the overview is open: the selected window 4 times a second, the rest once a second. Live previews were dropped because a single live capture makes the full-screen overview repaint at the monitor's refresh rate; on an Intel Iris Plus laptop that was a steady ~40% of the GPU and ~10% of a CPU core for both the shell and Hyprland, against roughly 5% GPU and under 1% CPU with timed snapshots, about the same as with the overview closed.
 - With several monitors, the selection, the arrow keys and dragging all cross monitors following their arrangement. Keys work from whichever monitor's overview has keyboard focus (clicking one moves it there). After a move, every monitor goes back to the workspace it was showing.
 - Tested with three monitors, including a 1.0-scale ultrawide next to a 2.0-scale laptop screen.
 

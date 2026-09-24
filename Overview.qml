@@ -167,6 +167,17 @@ Item {
     }
   }
 
+  // Refreshes the snapshot previews while the overview is open: every window
+  // once a second, the selected one on every tick (4 a second).
+  signal previewTick(bool fast)
+  Timer {
+    property int count: 0
+    interval: 250
+    repeat: true
+    running: root.opened
+    onTriggered: root.previewTick(++count % 4 !== 0)
+  }
+
   // Re-read the layout shortly after moving or closing a window, once
   // Hyprland has applied it, keeping the selection where it was. A refresh
   // that comes due mid-drag waits for the drop, so the layout does not shift
@@ -1237,11 +1248,25 @@ Item {
                   border.color: root.dimBorder
                 }
 
+                // Previews are snapshots, refreshed on a timer, never live: a
+                // single live preview makes the full-screen overview repaint
+                // at the monitor's refresh rate, a steady ~40% of an
+                // integrated GPU, where snapshots refreshed as below cost
+                // about as much as the overview being closed. The selected
+                // window refreshes 4 times a second, the rest once.
                 ScreencopyView {
+                  id: preview
                   anchors.fill: parent
                   anchors.margins: 1
                   captureSource: win.toplevel
-                  live: root.opened
+                  live: false
+
+                  Connections {
+                    target: root
+                    function onPreviewTick(fast) {
+                      if (preview.captureSource && (!fast || win.selected)) preview.captureFrame()
+                    }
+                  }
                 }
 
                 // Selection highlight: accent tint and border drawn over the
@@ -1318,7 +1343,7 @@ Item {
                 anchors.margins: Style.space(2)
                 opacity: 0.6
                 captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
-                live: slot.visible
+                live: false
               }
             }
 
@@ -1654,7 +1679,7 @@ Item {
           anchors.fill: parent
           anchors.margins: Style.space(2)
           captureSource: root.dragWin ? root.toplevelFor(root.dragWin.address) : null
-          live: dragProxy.visible
+          live: false
         }
       }
     }
