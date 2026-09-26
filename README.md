@@ -104,7 +104,7 @@ One window is selected at a time. It starts on the focused window and follows th
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
 | SUPER + arrow keys | Jump to the neighbouring workspace, unused box or "+" (needs the forwarder above) |
-| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop slots (works directly when Hyprland has nothing bound to it; otherwise use the forwarder above) (each side of every window, empty workspaces, the unused boxes and "+"); after that, plain arrows keep moving it, Enter drops it and Esc cancels (needs the forwarder above) |
+| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop spots (each side of every window, empty workspaces, the "+" tile and the unused boxes); after that, plain arrows keep moving it, Enter places it and closes the overview with the window focused, and Esc cancels. Works directly when Hyprland has nothing bound to it; otherwise use the forwarder above |
 | SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 
