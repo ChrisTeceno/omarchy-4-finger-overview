@@ -2,6 +2,8 @@
 
 A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger swipe up on the trackpad, similar to Mission Control on macOS.
 
+![The overview on one monitor: four workspaces with live previews, a tab group, the "+" tile, unused workspaces on the right, and a scratchpad below](docs/screenshot.png)
+
 It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Each monitor's grid ends with a "+" tile for a new workspace, which takes the lowest workspace number not in use, and a column on the right lists the other unused workspaces from 1 to 10 as small numbered boxes. Using the "+" tile or a box on a monitor puts that workspace on that monitor.
 
 Drag a window onto the "+" tile or an unused box to move it there. The box column is a wide target (anywhere from just left of the boxes to the screen edge), the box under the cursor grows around the window without moving the others, and a tab beside it names the destination ("Workspace 7", "New workspace 12"). Boxes scale with the monitor, so they stay easy to hit on a large screen. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land, and the workspace the window leaves closes the gap it leaves, the way Hyprland will re-tile it. That also makes reordering inside one workspace preview correctly. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
@@ -9,6 +11,26 @@ Drag a window onto the "+" tile or an unused box to move it there. The box colum
 Placement uses Hyprland's dwindle layout with `use_active_for_splits` on (the default): on drop the plugin briefly focuses the target window behind the overview, preselects the side, moves the window in, and switches back to the workspace you were on.
 
 It runs as an overlay plugin inside the Omarchy shell (Quickshell), so it picks up your theme's menu colors and font and needs no extra process.
+
+## In action
+
+Open it and move around with the arrow keys:
+
+![Opening the overview and moving the selection with the arrow keys](docs/navigate.gif)
+
+Type to search by title, app, or the program running inside a window (`nvim` finds the tab group it runs in, `lazygit` the scratchpad):
+
+![Searching for windows by title and by the program running inside them](docs/search.gif)
+
+Drag a window beside another one, or onto "+" for a new workspace:
+
+![Dragging a window into a split, then onto the "+" tile to make a new workspace](docs/drag.gif)
+
+Or grab it from the keyboard with SUPER+SHIFT+arrows and place it with Enter, which closes the overview with the window focused:
+
+![Moving a window with the keyboard and placing it with Enter](docs/keyboard-move.gif)
+
+The screenshots and recordings use generic demo workspaces on a virtual monitor.
 
 ## Requirements
 

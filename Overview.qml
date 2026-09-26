@@ -193,7 +193,7 @@ Item {
 
   function refresh() {
     if (!root.opened) return
-    if (root.dragWin) { root.refreshPending = true; return }
+    if (root.dragWin && !root.settling) { root.refreshPending = true; return }
     root.keepSelection = true
     clientsProc.running = true
   }
@@ -206,7 +206,7 @@ Item {
       if (!root.opened) return
       var names = ["openwindow", "closewindow", "movewindowv2", "changefloatingmode", "fullscreen",
                    "togglegroup", "moveintogroup", "moveoutofgroup", "createworkspacev2", "destroyworkspacev2", "moveworkspacev2",
-                   "monitoraddedv2", "monitorremovedv2"]
+                   "monitoraddedv2", "monitorremovedv2", "renameworkspace"]
       if (names.indexOf(event.name) >= 0) refreshTimer.restart()
     }
   }
@@ -309,6 +309,9 @@ Item {
     for (var n = 1; n <= 10; n++) if (!used[n] && n !== lowest) free.push(n)
 
     var focused = data.monitors.find(function(m) { return m.focused }) || data.monitors[0]
+
+    // A drop held its preview until now; the new layout replaces it.
+    if (root.settling) { settleTimer.stop(); root.settling = false; root.endDrag() }
 
     // The selection before this rebuild, by identity rather than index.
     var keep = root.keepSelection
@@ -827,6 +830,25 @@ Item {
       root.close()
     }
     root.dropFocus = ""
+    // After a mouse drop that moves a window, keep showing where it landed
+    // until the overview re-reads the layout, instead of flashing the old
+    // layout for the moment Hyprland takes to apply the move.
+    if (moved && !focusAfter) {
+      root.dragWin = w
+      root.dropTarget = target
+      root.dropAt = at
+      root.dropBox = box
+      root.dragMon = mon
+      root.settling = true
+      settleTimer.restart()
+    }
+  }
+
+  property bool settling: false
+  Timer {
+    id: settleTimer
+    interval: 1500
+    onTriggered: if (root.settling) { root.settling = false; root.endDrag() }
   }
 
   // Steps after a drop: put every monitor back as it was, then, for a
