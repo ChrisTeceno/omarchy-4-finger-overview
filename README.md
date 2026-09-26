@@ -2,11 +2,11 @@
 
 A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger swipe up on the trackpad, similar to Mission Control on macOS.
 
-![The overview on one monitor: four workspaces with window previews, a tab group, the "+" tile, unused workspaces on the right, and a scratchpad below](docs/screenshot.png)
+![The overview on one monitor: four workspaces with window previews, a tab group, the "+" tile, and a scratchpad below](docs/screenshot.png)
 
-It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with previews of its windows. Each monitor's grid ends with a "+" tile for a new workspace, which takes the lowest workspace number not in use, and a column on the right lists the other unused workspaces from 1 to 10 as small numbered boxes. Using the "+" tile or a box on a monitor puts that workspace on that monitor.
+It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with previews of its windows. Each monitor's grid ends with a "+" tile for a new workspace, which takes the lowest workspace number not in use and puts it on that monitor.
 
-Drag a window onto the "+" tile or an unused box to move it there. The box column is a wide target (anywhere from just left of the boxes to the screen edge), the box under the cursor grows around the window without moving the others, and a tab beside it names the destination ("Workspace 7", "New workspace 12"). Boxes scale with the monitor, so they stay easy to hit on a large screen. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land, and the workspace the window leaves closes the gap it leaves, the way Hyprland will re-tile it. That also makes reordering inside one workspace preview correctly. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
+Drag a window onto the "+" tile to move it to a new workspace; the tile highlights around it while you hover. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land, and the workspace the window leaves closes the gap it leaves, the way Hyprland will re-tile it. That also makes reordering inside one workspace preview correctly. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
 
 Placement uses Hyprland's dwindle layout with `use_active_for_splits` on (the default): on drop the plugin briefly focuses the target window behind the overview, preselects the side, moves the window in, and switches back to the workspace you were on.
 
@@ -119,14 +119,14 @@ One window is selected at a time. It starts on the focused window and follows th
 | Esc | Cancel a drag, then clear the search, then close |
 | Type | Search windows (Backspace edits) |
 | Hover a window | Select it |
-| Click a window, or Enter | Focus the selected window (Enter on a box goes to that workspace) |
+| Click a window, or Enter | Focus the selected window (Enter on "+" opens a new workspace) |
 | Click the empty part of a workspace | Switch to that workspace |
-| Click "+" or an unused box | Go to a new workspace (lowest free number), or that one |
-| Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or to an unused box or "+" |
+| Click "+" | Go to a new workspace (lowest free number) on that monitor |
+| Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or onto "+" for a new workspace |
 | Middle-click a window | Close it |
-| Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
-| SUPER + arrow keys | Jump to the neighbouring workspace, unused box or "+" (needs the forwarder above) |
-| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop spots (each side of every window, empty workspaces, the "+" tile and the unused boxes); after that, plain arrows keep moving it, Enter places it and closes the overview with the window focused, and Esc cancels. Works directly when Hyprland has nothing bound to it; otherwise use the forwarder above |
+| Arrow keys | Select the nearest window in that direction, across workspaces and onto "+" |
+| SUPER + arrow keys | Jump to the neighbouring workspace or "+" (needs the forwarder above) |
+| SUPER + SHIFT + arrow keys | Grab the selected window and move it between drop spots (each side of every window, empty workspaces, and the "+" tile); after that, plain arrows keep moving it, Enter places it and closes the overview with the window focused, and Esc cancels. Works directly when Hyprland has nothing bound to it; otherwise use the forwarder above |
 | SUPER + K | Show or hide the shortcut sheet (needs the forwarder above) |
 | Tab, Shift+Tab | Step through every window in order |
 
