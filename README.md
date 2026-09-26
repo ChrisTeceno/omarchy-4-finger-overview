@@ -2,9 +2,9 @@
 
 A workspace overview for [Omarchy](https://omarchy.org/), opened with a 4-finger swipe up on the trackpad, similar to Mission Control on macOS.
 
-It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. A column on the right of each monitor lists the unused workspaces 1 to 10 as small numbered boxes, plus a "+" box for a new workspace; using a box on a monitor puts that workspace on that monitor.
+It opens on **every monitor at once**, and each monitor shows its own workspaces that hold at least one window, each drawn as a scaled-down copy of the monitor with live previews of its windows. Each monitor's grid ends with a "+" tile for a new workspace, which takes the lowest workspace number not in use, and a column on the right lists the other unused workspaces from 1 to 10 as small numbered boxes. Using the "+" tile or a box on a monitor puts that workspace on that monitor.
 
-Drag a window onto an unused box or "+" to move it there. The box column is a wide target (anywhere from just left of the boxes to the screen edge), the box under the cursor grows around the window without moving the others, and a tab beside it names the destination ("Workspace 7", "New workspace 12"). Boxes scale with the monitor, so they stay easy to hit on a large screen. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land, and the workspace the window leaves closes the gap it leaves, the way Hyprland will re-tile it. That also makes reordering inside one workspace preview correctly. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
+Drag a window onto the "+" tile or an unused box to move it there. The box column is a wide target (anywhere from just left of the boxes to the screen edge), the box under the cursor grows around the window without moving the others, and a tab beside it names the destination ("Workspace 7", "New workspace 12"). Boxes scale with the monitor, so they stay easy to hit on a large screen. Drag it onto any workspace, including its own, to place it next to a specific window: the tiled window under the cursor (or the nearest one) is split, and the window goes on the side of it nearest the cursor (left, right, above or below). While you hover, that window slides over and a slot opens where the dragged window will land, and the workspace the window leaves closes the gap it leaves, the way Hyprland will re-tile it. That also makes reordering inside one workspace preview correctly. A floating window is tiled as it lands. The overview stays open and redraws with the new layout.
 
 Placement uses Hyprland's dwindle layout with `use_active_for_splits` on (the default): on drop the plugin briefly focuses the target window behind the overview, preselects the side, moves the window in, and switches back to the workspace you were on.
 
@@ -99,7 +99,7 @@ One window is selected at a time. It starts on the focused window and follows th
 | Hover a window | Select it |
 | Click a window, or Enter | Focus the selected window (Enter on a box goes to that workspace) |
 | Click the empty part of a workspace | Switch to that workspace |
-| Click an unused box or "+" | Switch to that workspace, or a new one |
+| Click "+" or an unused box | Go to a new workspace (lowest free number), or that one |
 | Drag a window | Move it next to the window it is dropped on (the side nearest the cursor), or to an unused box or "+" |
 | Middle-click a window | Close it |
 | Arrow keys | Select the nearest window in that direction, across workspaces and into the unused boxes and "+" |
@@ -126,7 +126,8 @@ Restart the shell after an update: this plugin stays loaded, and the shell's hot
 - The overview follows windows opening, closing and moving while it is showing, and keeps the selection where it was.
 - Previews are snapshots refreshed while the overview is open: the selected window 4 times a second, the rest once a second. Live previews were dropped because a single live capture makes the full-screen overview repaint at the monitor's refresh rate; on an Intel Iris Plus laptop that was a steady ~40% of the GPU and ~10% of a CPU core for both the shell and Hyprland, against roughly 5% GPU and under 1% CPU with timed snapshots, about the same as with the overview closed.
 - With several monitors, the selection, the arrow keys and dragging all cross monitors following their arrangement. Keys work from whichever monitor's overview has keyboard focus (clicking one moves it there). After a move, every monitor goes back to the workspace it was showing.
-- Tested with three monitors, including a 1.0-scale ultrawide next to a 2.0-scale laptop screen.
+- Tested with three monitors, including a 1.0-scale ultrawide next to a 2.0-scale laptop screen, with monitors added and removed while the overview is open, and with a rotated (portrait) monitor.
+- Arrow-key movement prefers targets in line with the current one (the way tiling focus moves), so an aligned workspace or "+" tile is not skipped for a closer one at an angle.
 
 ## License
 
