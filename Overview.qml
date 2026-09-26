@@ -419,7 +419,7 @@ Item {
     var steps = []
     if (!root.workspaceExists(wsId)) steps.push("hl.dsp.focus({ monitor = \"" + mon + "\" })")
     steps.push("hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + wsId + "\", follow = false })")
-    root.runBatch(steps.concat(root.restoreSteps()))
+    root.runBatch(steps.concat(root.afterDropSteps(w)))
   }
 
   function workspaceWindows(id) {
@@ -465,7 +465,7 @@ Item {
       steps.push("hl.dsp.layout(\"preselect " + side + "\")")
       steps.push("hl.dsp.window.move({ window = \"" + addr + "\", workspace = \"" + wsId + "\", follow = false })")
     }
-    root.runBatch(steps.concat(root.restoreSteps()))
+    root.runBatch(steps.concat(root.afterDropSteps(w)))
   }
 
   function activateSelection() {
@@ -797,22 +797,45 @@ Item {
     return { target: target, side: side }
   }
 
-  function finishDrag() {
+  // Drop the dragged window. A mouse drop keeps the overview open for more
+  // arranging; a keyboard drop (Enter after SUPER+SHIFT+arrow) closes it with
+  // the placed window focused.
+  function finishDrag(focusAfter) {
     var w = root.dragWin
     var target = root.dropTarget
     var at = root.dropAt
     var box = root.dropBox
     var mon = root.dragMon
     root.endDrag()
-    if (!w || target === 0) return
-    var dest = null
-    for (var name in root.wsByMon) dest = dest || root.wsByMon[name].find(function(x) { return x.id === target })
-    if (dest && dest.special) {
-      if (target !== w.workspace.id)
-        root.runBatch(["hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + dest.name + "\", follow = false })"].concat(root.restoreSteps()))
+    if (!w) return
+    root.dropFocus = focusAfter ? w.address : ""
+    var moved = false
+    if (target !== 0) {
+      var dest = null
+      for (var name in root.wsByMon) dest = dest || root.wsByMon[name].find(function(x) { return x.id === target })
+      if (dest && dest.special) {
+        if (target !== w.workspace.id) {
+          moved = true
+          root.runBatch(["hl.dsp.window.move({ window = \"address:" + w.address + "\", workspace = \"" + dest.name + "\", follow = false })"].concat(root.afterDropSteps(w)))
+        }
+      }
+      else if (!box && at && at.target) { moved = true; root.placeWindow(w, target, at.target, at.side) }
+      else if (target !== w.workspace.id) { moved = true; root.moveWindow(w, target, mon) }
     }
-    else if (!box && at && at.target) root.placeWindow(w, target, at.target, at.side)
-    else if (target !== w.workspace.id) root.moveWindow(w, target, mon)
+    if (focusAfter) {
+      if (!moved) root.dispatch("hl.dsp.focus({ window = \"address:" + w.address + "\" })")
+      root.close()
+    }
+    root.dropFocus = ""
+  }
+
+  // Steps after a drop: put every monitor back as it was, then, for a
+  // keyboard drop, focus the placed window (which shows its workspace).
+  property string dropFocus: ""
+  function afterDropSteps(w) {
+    var steps = root.restoreSteps()
+    if (root.dropFocus) steps.push("hl.dsp.focus({ window = \"address:" + root.dropFocus + "\" })")
+    return steps
   }
 
   // Keyboard drag. The first SUPER+SHIFT+arrow picks up the selected window;
@@ -1052,7 +1075,7 @@ Item {
     else if ((event.modifiers & Qt.MetaModifier) && k === Qt.Key_Down) root.moveWorkspace(0, 1)
     else if (root.keyGrab && (k === Qt.Key_Left || k === Qt.Key_Right || k === Qt.Key_Up || k === Qt.Key_Down))
       root.grabStep(k === Qt.Key_Left ? -1 : k === Qt.Key_Right ? 1 : 0, k === Qt.Key_Up ? -1 : k === Qt.Key_Down ? 1 : 0)
-    else if (root.keyGrab && (k === Qt.Key_Return || k === Qt.Key_Enter)) root.finishDrag()
+    else if (root.keyGrab && (k === Qt.Key_Return || k === Qt.Key_Enter)) root.finishDrag(true)
     else if (k === Qt.Key_Escape) {
       if (root.dragWin) root.endDrag()
       else if (root.filterText) root.setFilter("")
@@ -1707,7 +1730,7 @@ Item {
               model: [
                 "Arrow keys", "Select the nearest window in that direction, on any monitor",
                 "SUPER + arrow keys", "Jump to the neighbouring workspace or box",
-                "SUPER + SHIFT + arrow keys", "Grab the selected window; arrows move it, Enter drops",
+                "SUPER + SHIFT + arrow keys", "Grab the selected window; arrows move it, Enter places it and closes",
                 "Tab / Shift + Tab", "Step through every window",
                 "Enter", "Focus the selected window, or go to the selected box",
                 "Type", "Search by title, app or program (Backspace edits)",
